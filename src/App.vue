@@ -56,6 +56,16 @@
           Skills Hub
         </button>
 
+        <button
+          v-if="!isSidebarCollapsed && isAdminUser"
+          class="sidebar-skills-link"
+          :class="{ 'is-active': isAdminRoute }"
+          type="button"
+          @click="router.push({ name: 'admin' }); isMobile && setSidebarCollapsed(true)"
+        >
+          Admin
+        </button>
+
         <SidebarThreadTree :groups="projectGroups" :project-display-name-by-id="projectDisplayNameById"
           v-if="!isSidebarCollapsed"
           :selected-thread-id="selectedThreadId" :is-loading="isLoadingThreads"
@@ -84,6 +94,19 @@
           </template>
           <template #meta>
             <div class="header-meta-stack">
+              <div class="header-session-row">
+                <span class="header-session-identity">
+                  {{ sessionLabel }}
+                </span>
+                <button
+                  type="button"
+                  class="header-session-logout"
+                  :disabled="isLoggingOut"
+                  @click="void onLogout()"
+                >
+                  {{ isLoggingOut ? 'Signing out…' : 'Sign out' }}
+                </button>
+              </div>
               <ServerPicker
                 :model-value="selectedServerId"
                 :options="availableServers"
@@ -98,6 +121,13 @@
         <section class="content-body">
           <template v-if="isSkillsRoute">
             <SkillsHub @skills-changed="onSkillsChanged" />
+          </template>
+          <template v-else-if="isAdminRoute">
+            <AdminPanel v-if="isAdminUser" />
+            <section v-else class="admin-guard">
+              <h2 class="admin-guard-title">Admin access required</h2>
+              <p class="admin-guard-subtitle">This page is only available to administrator accounts.</p>
+            </section>
           </template>
           <template v-else-if="isHomeRoute">
             <div class="content-grid">
@@ -165,6 +195,7 @@ import QueuedMessages from './components/content/QueuedMessages.vue'
 import CwdPicker from './components/content/CwdPicker.vue'
 import ServerPicker from './components/content/ServerPicker.vue'
 import SkillsHub from './components/content/SkillsHub.vue'
+import AdminPanel from './components/content/AdminPanel.vue'
 import SidebarThreadControls from './components/sidebar/SidebarThreadControls.vue'
 import IconTablerSearch from './components/icons/IconTablerSearch.vue'
 import IconTablerX from './components/icons/IconTablerX.vue'
@@ -249,13 +280,28 @@ const knownThreadIdSet = computed(() => {
 
 const isHomeRoute = computed(() => route.name === 'home')
 const isSkillsRoute = computed(() => route.name === 'skills')
+const isAdminRoute = computed(() => route.name === 'admin')
+type SessionUser = {
+  id: string
+  username: string
+  role: 'admin' | 'user'
+}
+const sessionUser = ref<SessionUser | null>(null)
+const isLoggingOut = ref(false)
+const isAdminUser = computed(() => sessionUser.value?.role === 'admin')
+const sessionLabel = computed(() => {
+  const user = sessionUser.value
+  if (!user) return 'Guest'
+  return `${user.username} (${user.role})`
+})
 const contentTitle = computed(() => {
   if (isSkillsRoute.value) return 'Skills'
+  if (isAdminRoute.value) return 'Admin'
   if (isHomeRoute.value) return 'New thread'
   return selectedThread.value?.title ?? 'Choose a thread'
 })
 const headerCwdDisplay = computed(() => {
-  if (isSkillsRoute.value) return ''
+  if (isSkillsRoute.value || isAdminRoute.value) return ''
   const homePath = selectedThread.value?.cwd?.trim() ?? ''
   return homePath || '~'
 })
@@ -422,6 +468,7 @@ function normalizeMessageType(rawType: string | undefined, role: string): string
 }
 
 async function initialize(): Promise<void> {
+  await refreshSessionUser()
   await refreshAll()
   hasInitialized.value = true
   await syncThreadSelectionWithRoute()
@@ -434,6 +481,17 @@ async function syncThreadSelectionWithRoute(): Promise<void> {
 
   try {
     if (route.name === 'home' || route.name === 'skills') {
+      if (selectedThreadId.value !== '') {
+        await selectThread('')
+      }
+      return
+    }
+
+    if (route.name === 'admin') {
+      if (!isAdminUser.value) {
+        await router.replace({ name: 'home' })
+        return
+      }
       if (selectedThreadId.value !== '') {
         await selectThread('')
       }
@@ -468,6 +526,7 @@ watch(
       isLoadingThreads.value,
       knownThreadIdSet.value.has(routeThreadId.value),
       selectedThreadId.value,
+      isAdminUser.value,
     ] as const,
   async () => {
     if (!hasInitialized.value) return
@@ -480,7 +539,7 @@ watch(
   async (threadId) => {
     if (!hasInitialized.value) return
     if (isRouteSyncInProgress.value) return
-    if (isHomeRoute.value || isSkillsRoute.value) return
+    if (isHomeRoute.value || isSkillsRoute.value || isAdminRoute.value) return
 
     if (!threadId) {
       if (route.name !== 'home') {
@@ -511,6 +570,56 @@ async function submitFirstMessageForNewThread(
     await router.replace({ name: 'thread', params: { threadId } })
   } catch {
     // Error is already reflected in state.
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+async function refreshSessionUser(): Promise<void> {
+  try {
+    const response = await fetch('/auth/session', {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    })
+    const payload = await response.json().catch(() => ({}))
+    const root = asRecord(payload)
+    const rawUser = asRecord(root?.user)
+    const authenticated = root?.authenticated === true
+
+    if (!response.ok || !authenticated || !rawUser) {
+      sessionUser.value = null
+      return
+    }
+
+    const id = typeof rawUser.id === 'string' ? rawUser.id.trim() : ''
+    const username = typeof rawUser.username === 'string' ? rawUser.username.trim() : ''
+    const role = rawUser.role === 'admin' ? 'admin' : 'user'
+    if (!id || !username) {
+      sessionUser.value = null
+      return
+    }
+    sessionUser.value = { id, username, role }
+  } catch {
+    sessionUser.value = null
+  }
+}
+
+async function onLogout(): Promise<void> {
+  if (isLoggingOut.value) return
+  isLoggingOut.value = true
+  try {
+    await fetch('/auth/logout', {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+    })
+  } finally {
+    sessionUser.value = null
+    isLoggingOut.value = false
+    window.location.reload()
   }
 }
 </script>
@@ -587,6 +696,18 @@ async function submitFirstMessageForNewThread(
   @apply min-w-0 flex flex-col gap-1;
 }
 
+.header-session-row {
+  @apply min-w-0 flex items-center justify-end gap-2;
+}
+
+.header-session-identity {
+  @apply text-xs text-zinc-600 truncate;
+}
+
+.header-session-logout {
+  @apply rounded border border-zinc-300 px-2 py-1 text-xs text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-60 disabled:cursor-not-allowed;
+}
+
 .content-body {
   @apply flex-1 min-h-0 w-full flex flex-col gap-2 sm:gap-3 pt-1 pb-2 sm:pb-4 overflow-y-hidden overflow-x-visible;
 }
@@ -613,6 +734,18 @@ async function submitFirstMessageForNewThread(
 
 .new-thread-hero {
   @apply m-0 text-2xl sm:text-[2.5rem] font-normal leading-[1.05] text-zinc-900;
+}
+
+.admin-guard {
+  @apply h-full w-full flex flex-col items-center justify-center gap-2 text-center px-4;
+}
+
+.admin-guard-title {
+  @apply m-0 text-lg font-semibold text-zinc-900;
+}
+
+.admin-guard-subtitle {
+  @apply m-0 text-sm text-zinc-500;
 }
 
 .build-badge {
