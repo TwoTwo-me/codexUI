@@ -3,3 +3,6 @@ dist/
 dist-cli/
 output/
 *.tsbuildinfo
+test-results/
+playwright-report/
+.artifacts/

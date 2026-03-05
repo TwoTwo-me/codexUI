@@ -2,16 +2,19 @@
 
 This document covers worker-3 assets for serverId routing contract tests and Codex CLI multi-server Docker verification.
 
-## 1) Run serverId routing/header tests
+## 1) Run multi-server + multi-user contract tests
 
 ```bash
 npm run test:multi-server
 ```
 
-The test suite validates helper/API contract behavior for server routing:
+The test suite validates **in-memory helper contracts** (mirroring production API payloads/routes) for:
 - request header injection: `x-codex-server-id`
 - SSE routing URL query: `?serverId=<id>`
 - end-to-end header transmission to an HTTP test server
+- multi-user auth flow: signup/login/session lookup
+- admin-only authorization for user list endpoint
+- server registry scoping by authenticated user
 
 ## 2) Prepare host auth file for Docker
 
@@ -61,6 +64,17 @@ npm run docker:multi-server:down
 ```
 
 `docker:multi-server:down` also removes the ephemeral auth copy.
+
+## 6) Playwright admin UI screenshot verification (Phase 2)
+
+```bash
+PLAYWRIGHT_PASSWORD='<admin-password>' npm run test:playwright:admin
+```
+
+Optional environment variables:
+- `PLAYWRIGHT_BASE_URL` (default: `http://127.0.0.1:4300`)
+- `PLAYWRIGHT_USERNAME` (default: `admin`)
+- `PLAYWRIGHT_SCREENSHOT_DIR` (default: `.artifacts/screenshots`)
 
 ## Notes
 

@@ -38,6 +38,7 @@
     "preview": "vite preview",
     "prepublishOnly": "npm run build",
     "test:multi-server": "node --test tests/multi-server",
+    "test:playwright:admin": "playwright test tests/playwright/phase2-admin-ui.spec.ts",
     "docker:multi-server:prepare-auth": "bash scripts/docker/prepare-codex-auth.sh",
     "docker:multi-server:up": "bash scripts/docker/multi-server-up.sh",
     "docker:multi-server:smoke": "bash scripts/docker/multi-server-smoke.sh",
@@ -48,6 +49,7 @@
     "express": "^5.1.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@tailwindcss/vite": "^4.1.18",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.2",
