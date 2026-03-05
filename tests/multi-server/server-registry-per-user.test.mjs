@@ -114,3 +114,52 @@ test('server registry API contract scopes registry state per authenticated user'
     assert.equal(anonymousRegistry.status, 401)
   })
 })
+
+test('server registry accepts relay transport metadata and validates relay payload', async () => {
+  await withApiServer(async (baseUrl) => {
+    const adminCookie = await createUserAndSession(baseUrl, 'relay-admin', 'admin')
+    const alphaCookie = await createUserAndSession(baseUrl, 'relay-alpha', 'user', adminCookie)
+
+    const invalidRelayCreate = await postJson(
+      `${baseUrl}/codex-api/servers`,
+      {
+        id: 'relay-invalid',
+        name: 'Relay Invalid',
+        transport: 'relay',
+      },
+      { Cookie: alphaCookie },
+    )
+    assert.equal(invalidRelayCreate.status, 400)
+
+    const relayCreate = await postJson(
+      `${baseUrl}/codex-api/servers`,
+      {
+        id: 'relay-edge-1',
+        name: 'Relay Edge',
+        transport: 'relay',
+        relay: {
+          agentId: 'agent:edge-1',
+          protocol: 'relay-http-v1',
+          requestTimeoutMs: 90_000,
+        },
+      },
+      { Cookie: alphaCookie },
+    )
+    assert.equal(relayCreate.status, 201)
+    const relayCreateBody = await relayCreate.json()
+    assert.equal(relayCreateBody.data.server.transport, 'relay')
+    assert.equal(relayCreateBody.data.server.relay.agentId, 'agent:edge-1')
+    assert.equal(relayCreateBody.data.server.relay.protocol, 'relay-http-v1')
+    assert.equal(relayCreateBody.data.server.relay.requestTimeoutMs, 90_000)
+
+    const alphaRegistryResponse = await fetch(`${baseUrl}/codex-api/servers`, {
+      headers: { Cookie: alphaCookie },
+    })
+    assert.equal(alphaRegistryResponse.status, 200)
+    const alphaRegistry = await alphaRegistryResponse.json()
+    const relayServer = alphaRegistry.data.servers.find((server) => server.id === 'relay-edge-1')
+    assert.ok(relayServer)
+    assert.equal(relayServer.transport, 'relay')
+    assert.equal(relayServer.relay.agentId, 'agent:edge-1')
+  })
+})

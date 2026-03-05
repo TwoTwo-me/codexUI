@@ -53,9 +53,19 @@ type PendingServerRequest = {
   receivedAtIso: string
 }
 
+type CodexRelayServerConfig = {
+  agentId: string
+  protocol: string
+  requestTimeoutMs: number
+}
+
+type CodexServerTransport = 'local' | 'relay'
+
 type CodexServerRecord = {
   id: string
   name: string
+  transport: CodexServerTransport
+  relay?: CodexRelayServerConfig
   createdAtIso: string
   updatedAtIso: string
 }
@@ -398,6 +408,11 @@ const DEFAULT_SERVER_ID = 'default'
 const DEFAULT_SERVER_NAME = 'Default server'
 const MAX_SERVER_ID_LENGTH = 64
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+const RELAY_AGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/
+const DEFAULT_RELAY_PROTOCOL = 'relay-http-v1'
+const MIN_RELAY_TIMEOUT_MS = 5_000
+const MAX_RELAY_TIMEOUT_MS = 300_000
+const DEFAULT_RELAY_TIMEOUT_MS = 60_000
 const MAX_JSON_BODY_BYTES = 1024 * 1024
 const MAX_TRANSCRIBE_BODY_BYTES = 25 * 1024 * 1024
 const cachedServerRegistryStateByScope = new Map<string, ServerRegistryState>()
@@ -408,7 +423,10 @@ type ServerRegistryScope = {
 }
 
 function cloneServerRecord(record: CodexServerRecord): CodexServerRecord {
-  return { ...record }
+  return {
+    ...record,
+    ...(record.relay ? { relay: { ...record.relay } } : {}),
+  }
 }
 
 function cloneServerRegistryState(state: ServerRegistryState): ServerRegistryState {
@@ -420,6 +438,44 @@ function cloneServerRegistryState(state: ServerRegistryState): ServerRegistrySta
 
 export function isValidServerId(value: string): boolean {
   return SERVER_ID_PATTERN.test(value)
+}
+
+function isValidRelayAgentId(value: string): boolean {
+  return RELAY_AGENT_ID_PATTERN.test(value)
+}
+
+function normalizeServerTransport(value: unknown): CodexServerTransport {
+  return value === 'relay' ? 'relay' : 'local'
+}
+
+function clampRelayTimeoutMs(value: unknown): number {
+  const numericValue = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(numericValue)) return DEFAULT_RELAY_TIMEOUT_MS
+  const normalized = Math.trunc(numericValue)
+  if (normalized < MIN_RELAY_TIMEOUT_MS) return MIN_RELAY_TIMEOUT_MS
+  if (normalized > MAX_RELAY_TIMEOUT_MS) return MAX_RELAY_TIMEOUT_MS
+  return normalized
+}
+
+function normalizeRelayServerConfig(value: unknown): CodexRelayServerConfig | null {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const agentId = typeof record.agentId === 'string' ? record.agentId.trim() : ''
+  if (!agentId || !isValidRelayAgentId(agentId)) {
+    return null
+  }
+
+  const protocol = typeof record.protocol === 'string' && record.protocol.trim().length > 0
+    ? record.protocol.trim()
+    : DEFAULT_RELAY_PROTOCOL
+
+  const requestTimeoutMs = clampRelayTimeoutMs(record.requestTimeoutMs)
+  return {
+    agentId,
+    protocol,
+    requestTimeoutMs,
+  }
 }
 
 function normalizeServerRecord(value: unknown, nowIso: string): CodexServerRecord | null {
@@ -441,10 +497,15 @@ function normalizeServerRecord(value: unknown, nowIso: string): CodexServerRecor
   const updatedAtIso = typeof record.updatedAtIso === 'string' && record.updatedAtIso.trim().length > 0
     ? record.updatedAtIso.trim()
     : createdAtIso
+  const transportCandidate = normalizeServerTransport(record.transport)
+  const relay = normalizeRelayServerConfig(record.relay)
+  const transport: CodexServerTransport = transportCandidate === 'relay' && relay ? 'relay' : 'local'
 
   return {
     id,
     name,
+    transport,
+    ...(transport === 'relay' && relay ? { relay } : {}),
     createdAtIso,
     updatedAtIso,
   }
@@ -454,6 +515,7 @@ function createDefaultServerRecord(nowIso: string): CodexServerRecord {
   return {
     id: DEFAULT_SERVER_ID,
     name: DEFAULT_SERVER_NAME,
+    transport: 'local',
     createdAtIso: nowIso,
     updatedAtIso: nowIso,
   }
@@ -1371,6 +1433,117 @@ function getSharedBridgeState(): SharedBridgeState {
   return created
 }
 
+type ServerTransportConfig = {
+  transport: CodexServerTransport
+  relay?: CodexRelayServerConfig
+}
+
+type ServerTransportConfigResult =
+  | { ok: true; value: ServerTransportConfig }
+  | { ok: false; error: string }
+
+function parseExplicitTransportValue(value: unknown): CodexServerTransport | null {
+  if (value === undefined) return null
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  if (normalized === 'local' || normalized === 'relay') {
+    return normalized
+  }
+  return null
+}
+
+function resolveCreateServerTransportConfig(payload: Record<string, unknown>): ServerTransportConfigResult {
+  const explicitTransport = parseExplicitTransportValue(payload.transport)
+  if (payload.transport !== undefined && explicitTransport === null) {
+    return {
+      ok: false,
+      error: 'Invalid body: "transport" must be "local" or "relay"',
+    }
+  }
+
+  const transport = explicitTransport ?? 'local'
+  if (transport === 'local') {
+    return {
+      ok: true,
+      value: { transport: 'local' },
+    }
+  }
+
+  const relay = normalizeRelayServerConfig(payload.relay)
+  if (!relay) {
+    return {
+      ok: false,
+      error: 'Relay transport requires relay.agentId',
+    }
+  }
+
+  return {
+    ok: true,
+    value: {
+      transport: 'relay',
+      relay,
+    },
+  }
+}
+
+function resolveUpdatedServerTransportConfig(
+  payload: Record<string, unknown>,
+  currentServer: CodexServerRecord,
+): ServerTransportConfigResult {
+  const explicitTransport = parseExplicitTransportValue(payload.transport)
+  if (payload.transport !== undefined && explicitTransport === null) {
+    return {
+      ok: false,
+      error: 'Invalid body: "transport" must be "local" or "relay"',
+    }
+  }
+
+  if (payload.relay !== undefined && payload.relay !== null && asRecord(payload.relay) === null) {
+    return {
+      ok: false,
+      error: 'Invalid body: "relay" must be an object',
+    }
+  }
+
+  const hasRelayPayload = payload.relay !== undefined
+  let transport: CodexServerTransport = explicitTransport ?? currentServer.transport
+  if (!explicitTransport && hasRelayPayload) {
+    if (currentServer.transport !== 'relay') {
+      return {
+        ok: false,
+        error: 'Relay config requires transport="relay"',
+      }
+    }
+    transport = 'relay'
+  }
+
+  if (transport === 'local') {
+    return {
+      ok: true,
+      value: { transport: 'local' },
+    }
+  }
+
+  const relay = hasRelayPayload
+    ? normalizeRelayServerConfig(payload.relay)
+    : currentServer.relay ?? null
+
+  if (!relay) {
+    return {
+      ok: false,
+      error: 'Relay transport requires relay.agentId',
+    }
+  }
+
+  return {
+    ok: true,
+    value: {
+      transport: 'relay',
+      relay,
+    },
+  }
+}
+
 export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
   const { runtimeRegistry } = getSharedBridgeState()
 
@@ -1433,6 +1606,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
         const providedName = typeof payload.name === 'string' ? payload.name.trim() : ''
         const makeDefault = payload.isDefault === true || payload.makeDefault === true || payload.default === true
+        const transportConfig = resolveCreateServerTransportConfig(payload)
+        if (!transportConfig.ok) {
+          setJson(res, 400, { error: transportConfig.error })
+          return
+        }
         const state = await readServerRegistryState(registryScope, { persistNormalized: true })
         const existingIds = new Set(state.servers.map((server) => server.id))
         if (providedServerId.length > 0 && existingIds.has(providedServerId)) {
@@ -1447,6 +1625,8 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const nextServer: CodexServerRecord = {
           id: nextServerId,
           name: providedName.length > 0 ? providedName : `Server ${String(state.servers.length + 1)}`,
+          transport: transportConfig.value.transport,
+          ...(transportConfig.value.relay ? { relay: transportConfig.value.relay } : {}),
           createdAtIso: nowIso,
           updatedAtIso: nowIso,
         }
@@ -1509,9 +1689,17 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           const nextName = typeof payload.name === 'string' && payload.name.trim().length > 0
             ? payload.name.trim()
             : state.servers[serverIndex].name
+          const transportConfig = resolveUpdatedServerTransportConfig(payload, state.servers[serverIndex])
+          if (!transportConfig.ok) {
+            setJson(res, 400, { error: transportConfig.error })
+            return
+          }
           const updatedServer: CodexServerRecord = {
             ...state.servers[serverIndex],
             name: nextName,
+            transport: transportConfig.value.transport,
+            ...(transportConfig.value.relay ? { relay: transportConfig.value.relay } : {}),
+            ...(transportConfig.value.transport === 'local' ? { relay: undefined } : {}),
             updatedAtIso: new Date().toISOString(),
           }
           const nextServers = [...state.servers]

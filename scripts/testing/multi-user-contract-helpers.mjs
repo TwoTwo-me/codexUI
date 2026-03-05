@@ -3,8 +3,11 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 export const SESSION_COOKIE_NAME = 'codex_web_local_token'
 
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
+const RELAY_AGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u
 const DEFAULT_SERVER_ID = 'default'
 const DEFAULT_SERVER_NAME = 'Default server'
+const DEFAULT_RELAY_PROTOCOL = 'relay-http-v1'
+const DEFAULT_RELAY_TIMEOUT_MS = 60_000
 
 function hashSecret(secret) {
   return createHash('sha256').update(secret).digest('hex')
@@ -75,6 +78,7 @@ function defaultServerRecord(nowIso) {
   return {
     id: DEFAULT_SERVER_ID,
     name: DEFAULT_SERVER_NAME,
+    transport: 'local',
     createdAtIso: nowIso,
     updatedAtIso: nowIso,
   }
@@ -83,7 +87,49 @@ function defaultServerRecord(nowIso) {
 function cloneRegistry(registry) {
   return {
     defaultServerId: registry.defaultServerId,
-    servers: registry.servers.map((server) => ({ ...server })),
+    servers: registry.servers.map((server) => ({
+      ...server,
+      ...(server.relay ? { relay: { ...server.relay } } : {}),
+    })),
+  }
+}
+
+function asRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value
+    : null
+}
+
+function clampTimeoutMs(value) {
+  if (!Number.isFinite(value)) return DEFAULT_RELAY_TIMEOUT_MS
+  const normalized = Math.trunc(value)
+  if (normalized < 5_000) return 5_000
+  if (normalized > 300_000) return 300_000
+  return normalized
+}
+
+function normalizeServerTransport(value) {
+  return value === 'relay' ? 'relay' : 'local'
+}
+
+function normalizeRelayConfig(value) {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const agentId = typeof record.agentId === 'string' ? record.agentId.trim() : ''
+  if (!agentId || !RELAY_AGENT_ID_PATTERN.test(agentId)) {
+    return null
+  }
+
+  const protocol = typeof record.protocol === 'string' && record.protocol.trim().length > 0
+    ? record.protocol.trim()
+    : DEFAULT_RELAY_PROTOCOL
+  const requestTimeoutMs = clampTimeoutMs(Number(record.requestTimeoutMs))
+
+  return {
+    agentId,
+    protocol,
+    requestTimeoutMs,
   }
 }
 
@@ -316,11 +362,18 @@ export function createMultiUserContractApi() {
 
           const nextServerId = providedServerId || buildFallbackServerId(payload.name, existingIds)
           const nowIso = new Date().toISOString()
+          const transport = normalizeServerTransport(payload.transport)
+          const relay = normalizeRelayConfig(payload.relay)
+          if (transport === 'relay' && !relay) {
+            return jsonResponse(400, { error: 'Relay transport requires relay.agentId' })
+          }
           const nextServer = {
             id: nextServerId,
             name: typeof payload.name === 'string' && payload.name.trim().length > 0
               ? payload.name.trim()
               : `Server ${String(state.servers.length + 1)}`,
+            transport,
+            ...(transport === 'relay' && relay ? { relay } : {}),
             createdAtIso: nowIso,
             updatedAtIso: nowIso,
           }
