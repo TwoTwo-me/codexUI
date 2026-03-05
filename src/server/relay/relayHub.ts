@@ -14,7 +14,10 @@ const MIN_RPC_TIMEOUT_MS = 5_000
 const MAX_RPC_TIMEOUT_MS = 300_000
 const DEFAULT_RPC_TIMEOUT_MS = 60_000
 const MAX_PENDING_RPC = 2_000
+const MAX_PENDING_RPC_PER_SCOPE = 512
+const MAX_PENDING_RPC_PER_AGENT = 512
 const MAX_SESSION_QUEUE = 512
+const MAX_ALLOWED_ROUTES_PER_AGENT = 1_024
 
 type RelayAgentRecord = {
   id: string
@@ -51,6 +54,8 @@ type PendingRelayRpc = {
   resolve: (value: unknown) => void
   reject: (error: unknown) => void
   timeoutHandle: NodeJS.Timeout
+  scopeKey: string
+  agentId: string
 }
 
 type RelayRoute = {
@@ -140,6 +145,8 @@ export class OutboundRelayHub {
   private readonly sessionById = new Map<string, RelaySession>()
   private readonly sessionIdByAgentId = new Map<string, string>()
   private readonly pendingRpcById = new Map<string, PendingRelayRpc>()
+  private readonly pendingRpcCountByScopeKey = new Map<string, number>()
+  private readonly pendingRpcCountByAgentId = new Map<string, number>()
   private readonly listenersByRouteKey = new Map<string, Set<RelayNotificationListener>>()
   private readonly allowedRoutesByAgentId = new Map<string, Set<string>>()
 
@@ -278,6 +285,14 @@ export class OutboundRelayHub {
     if (this.pendingRpcById.size >= MAX_PENDING_RPC) {
       throw new RelayHubError('relay_overloaded', 'Relay hub is overloaded', 503)
     }
+    const pendingForScope = this.pendingRpcCountByScopeKey.get(route.scopeKey) ?? 0
+    if (pendingForScope >= MAX_PENDING_RPC_PER_SCOPE) {
+      throw new RelayHubError('relay_scope_overloaded', 'Relay scope is overloaded', 429)
+    }
+    const pendingForAgent = this.pendingRpcCountByAgentId.get(route.agentId) ?? 0
+    if (pendingForAgent >= MAX_PENDING_RPC_PER_AGENT) {
+      throw new RelayHubError('relay_agent_overloaded', `Relay agent "${route.agentId}" is overloaded`, 429)
+    }
 
     const sessionId = this.sessionIdByAgentId.get(route.agentId)
     if (!sessionId) {
@@ -298,6 +313,9 @@ export class OutboundRelayHub {
 
     const routeKey = toRouteKey({ scopeKey: route.scopeKey, serverId: route.serverId })
     const allowedRoutes = this.allowedRoutesByAgentId.get(route.agentId) ?? new Set<string>()
+    if (!allowedRoutes.has(routeKey) && allowedRoutes.size >= MAX_ALLOWED_ROUTES_PER_AGENT) {
+      throw new RelayHubError('relay_backpressure', 'Relay route limit reached for this agent', 429)
+    }
     allowedRoutes.add(routeKey)
     this.allowedRoutesByAgentId.set(route.agentId, allowedRoutes)
 
@@ -318,11 +336,22 @@ export class OutboundRelayHub {
 
     const resultPromise = new Promise<unknown>((resolve, reject) => {
       const timeoutHandle = setTimeout(() => {
+        const timedOutPending = this.pendingRpcById.get(relayId)
         this.pendingRpcById.delete(relayId)
+        if (timedOutPending) {
+          this.decrementPendingCounters(timedOutPending.scopeKey, timedOutPending.agentId)
+        }
         reject(new RelayHubError('relay_timeout', `Relay RPC timed out after ${String(timeoutMs)}ms`, 504))
       }, timeoutMs)
 
-      this.pendingRpcById.set(relayId, { resolve, reject, timeoutHandle })
+      this.pendingRpcById.set(relayId, {
+        resolve,
+        reject,
+        timeoutHandle,
+        scopeKey: route.scopeKey,
+        agentId: route.agentId,
+      })
+      this.incrementPendingCounters(route.scopeKey, route.agentId)
     })
 
     session.queue.push(envelope)
@@ -402,14 +431,47 @@ export class OutboundRelayHub {
     waiter.resolve(messages)
   }
 
+  private incrementPendingCounters(scopeKey: string, agentId: string): void {
+    this.pendingRpcCountByScopeKey.set(scopeKey, (this.pendingRpcCountByScopeKey.get(scopeKey) ?? 0) + 1)
+    this.pendingRpcCountByAgentId.set(agentId, (this.pendingRpcCountByAgentId.get(agentId) ?? 0) + 1)
+  }
+
+  private decrementPendingCounters(scopeKey: string, agentId: string): void {
+    const scopeCount = this.pendingRpcCountByScopeKey.get(scopeKey) ?? 0
+    if (scopeCount <= 1) {
+      this.pendingRpcCountByScopeKey.delete(scopeKey)
+    } else {
+      this.pendingRpcCountByScopeKey.set(scopeKey, scopeCount - 1)
+    }
+
+    const agentCount = this.pendingRpcCountByAgentId.get(agentId) ?? 0
+    if (agentCount <= 1) {
+      this.pendingRpcCountByAgentId.delete(agentId)
+    } else {
+      this.pendingRpcCountByAgentId.set(agentId, agentCount - 1)
+    }
+  }
+
+  private rejectPendingRpcByAgent(agentId: string): void {
+    for (const [relayId, pending] of this.pendingRpcById.entries()) {
+      if (pending.agentId !== agentId) continue
+      this.pendingRpcById.delete(relayId)
+      clearTimeout(pending.timeoutHandle)
+      this.decrementPendingCounters(pending.scopeKey, pending.agentId)
+      pending.reject(new RelayHubError('relay_agent_offline', `Relay agent "${agentId}" disconnected`, 503))
+    }
+  }
+
   private acceptResponseEnvelope(record: Record<string, unknown>, agentId: string): boolean {
     const relayId = typeof record.relayId === 'string' ? record.relayId : ''
     if (!relayId) return false
 
     const pending = this.pendingRpcById.get(relayId)
     if (!pending) return false
+    if (pending.agentId !== agentId) return false
     this.pendingRpcById.delete(relayId)
     clearTimeout(pending.timeoutHandle)
+    this.decrementPendingCounters(pending.scopeKey, pending.agentId)
 
     const errorRecord = asRecord(record.error)
     if (errorRecord) {
@@ -478,6 +540,7 @@ export class OutboundRelayHub {
     this.sessionById.delete(sessionId)
     this.sessionIdByAgentId.delete(session.agentId)
     this.allowedRoutesByAgentId.delete(session.agentId)
+    this.rejectPendingRpcByAgent(session.agentId)
     if (session.waiter) {
       clearTimeout(session.waiter.timeoutHandle)
       session.waiter.resolve([])
