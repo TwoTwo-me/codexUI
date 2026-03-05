@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { homedir } from 'node:os'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { writeFile } from 'node:fs/promises'
 
 type JsonRpcCall = {
@@ -1076,6 +1076,49 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         })
         setJson(res, 200, { data: { path: normalizedPath } })
         return
+      }
+
+      if (req.method === 'GET' && url.pathname === '/codex-api/fs/list') {
+        const homePath = homedir()
+        const rawPath = url.searchParams.get('path')?.trim() ?? ''
+        const currentPath = rawPath.length > 0 ? (isAbsolute(rawPath) ? rawPath : resolve(rawPath)) : homePath
+
+        try {
+          const info = await stat(currentPath)
+          if (!info.isDirectory()) {
+            setJson(res, 400, { error: 'Path exists but is not a directory' })
+            return
+          }
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException | undefined)?.code
+          if (code === 'ENOENT') {
+            setJson(res, 404, { error: 'Directory does not exist' })
+            return
+          }
+          setJson(res, 500, { error: 'Failed to access directory' })
+          return
+        }
+
+        try {
+          const parentCandidate = dirname(currentPath)
+          const entries = (await readdir(currentPath, { withFileTypes: true }))
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => ({ name: entry.name, path: join(currentPath, entry.name) }))
+            .sort((a, b) => a.name.localeCompare(b.name))
+
+          setJson(res, 200, {
+            data: {
+              currentPath,
+              homePath,
+              parentPath: parentCandidate === currentPath ? null : parentCandidate,
+              entries,
+            },
+          })
+          return
+        } catch {
+          setJson(res, 500, { error: 'Failed to read directory' })
+          return
+        }
       }
 
       if (req.method === 'GET' && url.pathname === '/codex-api/project-root-suggestion') {
