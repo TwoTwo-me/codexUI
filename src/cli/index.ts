@@ -166,6 +166,7 @@ async function startServer(options: { port: string; password: string | boolean }
   }
 
   if (password) {
+    lines.push('  Username: admin')
     lines.push(`  Password: ${password}`)
   }
 

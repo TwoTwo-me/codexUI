@@ -6,6 +6,8 @@ import { homedir } from 'node:os'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { writeFile } from 'node:fs/promises'
+import { getRequestAuthScopeKey, getRequestAuthenticatedUser } from './requestAuthContext.js'
+import { listUsers } from './userStore.js'
 
 type JsonRpcCall = {
   jsonrpc: '2.0'
@@ -391,13 +393,19 @@ function getCodexGlobalStatePath(): string {
 }
 
 const SERVER_REGISTRY_STATE_KEY = 'codexui-server-registry'
+const SERVER_REGISTRY_STATE_BY_USER_KEY = 'codexui-server-registry-by-user'
 const DEFAULT_SERVER_ID = 'default'
 const DEFAULT_SERVER_NAME = 'Default server'
 const MAX_SERVER_ID_LENGTH = 64
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const MAX_JSON_BODY_BYTES = 1024 * 1024
 const MAX_TRANSCRIBE_BODY_BYTES = 25 * 1024 * 1024
-let cachedServerRegistryState: ServerRegistryState | null = null
+const cachedServerRegistryStateByScope = new Map<string, ServerRegistryState>()
+
+type ServerRegistryScope = {
+  cacheKey: string
+  userId: string | null
+}
 
 function cloneServerRecord(record: CodexServerRecord): CodexServerRecord {
   return { ...record }
@@ -495,30 +503,92 @@ async function writeCodexGlobalStatePayload(payload: Record<string, unknown>): P
   await writeFile(statePath, JSON.stringify(payload), 'utf8')
 }
 
-async function readServerRegistryState(options: { persistNormalized?: boolean } = {}): Promise<ServerRegistryState> {
-  if (cachedServerRegistryState && options.persistNormalized !== true) {
-    return cloneServerRegistryState(cachedServerRegistryState)
+function resolveServerRegistryScope(req: IncomingMessage): ServerRegistryScope {
+  const user = getRequestAuthenticatedUser(req)
+  if (!user) {
+    return {
+      cacheKey: 'global',
+      userId: null,
+    }
+  }
+
+  return {
+    cacheKey: getRequestAuthScopeKey(req),
+    userId: user.id,
+  }
+}
+
+function readScopedServerRegistryRawValue(
+  payload: Record<string, unknown>,
+  scope: ServerRegistryScope,
+): { rawValue: unknown } {
+  if (!scope.userId) {
+    return {
+      rawValue: payload[SERVER_REGISTRY_STATE_KEY],
+    }
+  }
+
+  const scopedPayload = asRecord(payload[SERVER_REGISTRY_STATE_BY_USER_KEY])
+  if (scopedPayload && Object.prototype.hasOwnProperty.call(scopedPayload, scope.userId)) {
+    return {
+      rawValue: scopedPayload[scope.userId],
+    }
+  }
+
+  if (scopedPayload && Object.keys(scopedPayload).length > 0) {
+    return {
+      rawValue: undefined,
+    }
+  }
+
+  return {
+    rawValue: payload[SERVER_REGISTRY_STATE_KEY],
+  }
+}
+
+async function readServerRegistryState(
+  scope: ServerRegistryScope,
+  options: { persistNormalized?: boolean } = {},
+): Promise<ServerRegistryState> {
+  const cachedState = cachedServerRegistryStateByScope.get(scope.cacheKey)
+  if (cachedState && options.persistNormalized !== true) {
+    return cloneServerRegistryState(cachedState)
   }
 
   const payload = await readCodexGlobalStatePayload()
-  const rawValue = payload[SERVER_REGISTRY_STATE_KEY]
+  const { rawValue } = readScopedServerRegistryRawValue(payload, scope)
   const normalized = normalizeServerRegistryState(rawValue)
-  cachedServerRegistryState = cloneServerRegistryState(normalized)
+  cachedServerRegistryStateByScope.set(scope.cacheKey, cloneServerRegistryState(normalized))
+
   const shouldPersist = options.persistNormalized === true
     && JSON.stringify(rawValue) !== JSON.stringify(normalized)
   if (shouldPersist) {
-    payload[SERVER_REGISTRY_STATE_KEY] = normalized
+    if (!scope.userId) {
+      payload[SERVER_REGISTRY_STATE_KEY] = normalized
+    } else {
+      const currentByUser = asRecord(payload[SERVER_REGISTRY_STATE_BY_USER_KEY]) ?? {}
+      currentByUser[scope.userId] = normalized
+      payload[SERVER_REGISTRY_STATE_BY_USER_KEY] = currentByUser
+    }
     await writeCodexGlobalStatePayload(payload)
   }
   return cloneServerRegistryState(normalized)
 }
 
-async function writeServerRegistryState(nextState: ServerRegistryState): Promise<void> {
+async function writeServerRegistryState(scope: ServerRegistryScope, nextState: ServerRegistryState): Promise<void> {
   const payload = await readCodexGlobalStatePayload()
   const normalized = normalizeServerRegistryState(nextState)
-  payload[SERVER_REGISTRY_STATE_KEY] = normalized
+
+  if (!scope.userId) {
+    payload[SERVER_REGISTRY_STATE_KEY] = normalized
+  } else {
+    const currentByUser = asRecord(payload[SERVER_REGISTRY_STATE_BY_USER_KEY]) ?? {}
+    currentByUser[scope.userId] = normalized
+    payload[SERVER_REGISTRY_STATE_BY_USER_KEY] = currentByUser
+  }
+
   await writeCodexGlobalStatePayload(payload)
-  cachedServerRegistryState = cloneServerRegistryState(normalized)
+  cachedServerRegistryStateByScope.set(scope.cacheKey, cloneServerRegistryState(normalized))
 }
 
 function buildServerIdSeed(value: string): string {
@@ -1185,32 +1255,59 @@ type ServerRuntime = {
 }
 
 class AppServerRuntimeRegistry {
-  private readonly runtimes = new Map<string, ServerRuntime>()
+  private readonly runtimesByScope = new Map<string, Map<string, ServerRuntime>>()
 
-  getRuntime(serverId: string): ServerRuntime {
-    const existing = this.runtimes.get(serverId)
+  private getScopeRuntimes(scopeKey: string): Map<string, ServerRuntime> {
+    const existingScope = this.runtimesByScope.get(scopeKey)
+    if (existingScope) return existingScope
+    const created = new Map<string, ServerRuntime>()
+    this.runtimesByScope.set(scopeKey, created)
+    return created
+  }
+
+  getRuntime(scopeKey: string, serverId: string): ServerRuntime {
+    const scopeRuntimes = this.getScopeRuntimes(scopeKey)
+    const existing = scopeRuntimes.get(serverId)
     if (existing) return existing
 
     const created: ServerRuntime = {
       appServer: new AppServerProcess(),
       methodCatalog: new MethodCatalog(),
     }
-    this.runtimes.set(serverId, created)
+    scopeRuntimes.set(serverId, created)
     return created
   }
 
-  disposeServer(serverId: string): void {
-    const runtime = this.runtimes.get(serverId)
+  disposeServer(scopeKey: string, serverId: string): void {
+    const scopeRuntimes = this.runtimesByScope.get(scopeKey)
+    if (!scopeRuntimes) return
+
+    const runtime = scopeRuntimes.get(serverId)
     if (!runtime) return
     runtime.appServer.dispose()
-    this.runtimes.delete(serverId)
+    scopeRuntimes.delete(serverId)
+    if (scopeRuntimes.size === 0) {
+      this.runtimesByScope.delete(scopeKey)
+    }
+  }
+
+  disposeScope(scopeKey: string): void {
+    const scopeRuntimes = this.runtimesByScope.get(scopeKey)
+    if (!scopeRuntimes) return
+
+    for (const runtime of scopeRuntimes.values()) {
+      runtime.appServer.dispose()
+    }
+    this.runtimesByScope.delete(scopeKey)
   }
 
   disposeAll(): void {
-    for (const runtime of this.runtimes.values()) {
-      runtime.appServer.dispose()
+    for (const scopeRuntimes of this.runtimesByScope.values()) {
+      for (const runtime of scopeRuntimes.values()) {
+        runtime.appServer.dispose()
+      }
     }
-    this.runtimes.clear()
+    this.runtimesByScope.clear()
   }
 }
 
@@ -1233,7 +1330,8 @@ async function resolveServerRuntime(
   url: URL,
   runtimeRegistry: AppServerRuntimeRegistry,
 ): Promise<ResolvedServerRuntime> {
-  const registryState = await readServerRegistryState()
+  const scope = resolveServerRegistryScope(req)
+  const registryState = await readServerRegistryState(scope)
   const requestedServerId = getRequestedServerId(req, url)
   const selectedServerId = requestedServerId ?? registryState.defaultServerId
 
@@ -1248,7 +1346,7 @@ async function resolveServerRuntime(
 
   return {
     server,
-    runtime: runtimeRegistry.getRuntime(server.id),
+    runtime: runtimeRegistry.getRuntime(scope.cacheKey, server.id),
   }
 }
 
@@ -1285,13 +1383,36 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
       const url = new URL(req.url, 'http://localhost')
       const serverResourceId = parseServerResourceId(url.pathname)
+      const registryScope = resolveServerRegistryScope(req)
+
       if (url.pathname.startsWith('/codex-api/servers/') && serverResourceId === null) {
         setJson(res, 400, { error: 'Invalid server resource path' })
         return
       }
 
+      if (req.method === 'GET' && url.pathname === '/codex-api/admin/users') {
+        const authenticatedUser = getRequestAuthenticatedUser(req)
+        if (!authenticatedUser) {
+          setJson(res, 401, { error: 'Authentication required' })
+          return
+        }
+        if (authenticatedUser.role !== 'admin') {
+          setJson(res, 403, { error: 'Admin role required' })
+          return
+        }
+
+        const users = await listUsers()
+        setJson(res, 200, { data: users })
+        return
+      }
+
+      if (url.pathname === '/codex-api/admin/users') {
+        setJson(res, 405, { error: 'Method not allowed' })
+        return
+      }
+
       if (req.method === 'GET' && url.pathname === '/codex-api/servers') {
-        const state = await readServerRegistryState({ persistNormalized: true })
+        const state = await readServerRegistryState(registryScope, { persistNormalized: true })
         setJson(res, 200, { data: state })
         return
       }
@@ -1312,7 +1433,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
         const providedName = typeof payload.name === 'string' ? payload.name.trim() : ''
         const makeDefault = payload.isDefault === true || payload.makeDefault === true || payload.default === true
-        const state = await readServerRegistryState({ persistNormalized: true })
+        const state = await readServerRegistryState(registryScope, { persistNormalized: true })
         const existingIds = new Set(state.servers.map((server) => server.id))
         if (providedServerId.length > 0 && existingIds.has(providedServerId)) {
           setJson(res, 409, { error: `Server "${providedServerId}" already exists` })
@@ -1333,7 +1454,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           defaultServerId: makeDefault ? nextServerId : state.defaultServerId,
           servers: [...state.servers, nextServer],
         }
-        await writeServerRegistryState(nextState)
+        await writeServerRegistryState(registryScope, nextState)
         setJson(res, 201, { data: { server: nextServer, registry: nextState } })
         return
       }
@@ -1350,7 +1471,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         }
 
         if (req.method === 'GET') {
-          const state = await readServerRegistryState({ persistNormalized: true })
+          const state = await readServerRegistryState(registryScope, { persistNormalized: true })
           const server = state.servers.find((item) => item.id === serverResourceId)
           if (!server) {
             setJson(res, 404, { error: `Server "${serverResourceId}" not found` })
@@ -1372,7 +1493,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             return
           }
 
-          const state = await readServerRegistryState({ persistNormalized: true })
+          const state = await readServerRegistryState(registryScope, { persistNormalized: true })
           const serverIndex = state.servers.findIndex((item) => item.id === serverResourceId)
           if (serverIndex === -1) {
             setJson(res, 404, { error: `Server "${serverResourceId}" not found` })
@@ -1408,14 +1529,14 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             defaultServerId: nextDefaultServerId,
             servers: nextServers,
           }
-          await writeServerRegistryState(nextState)
+          await writeServerRegistryState(registryScope, nextState)
           setJson(res, 200, { data: { server: updatedServer, registry: nextState } })
           return
         }
 
         if (req.method === 'DELETE') {
           requireLoopbackForSensitiveMutation(req, 'Server registry updates')
-          const state = await readServerRegistryState({ persistNormalized: true })
+          const state = await readServerRegistryState(registryScope, { persistNormalized: true })
           const targetServer = state.servers.find((item) => item.id === serverResourceId)
           if (!targetServer) {
             setJson(res, 404, { error: `Server "${serverResourceId}" not found` })
@@ -1438,8 +1559,8 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             defaultServerId: nextDefaultServerId,
             servers: nextServers,
           }
-          await writeServerRegistryState(nextState)
-          runtimeRegistry.disposeServer(serverResourceId)
+          await writeServerRegistryState(registryScope, nextState)
+          runtimeRegistry.disposeServer(registryScope.cacheKey, serverResourceId)
           setJson(res, 200, { ok: true, data: nextState })
           return
         }
