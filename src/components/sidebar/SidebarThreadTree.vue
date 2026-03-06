@@ -2,7 +2,13 @@
   <section class="thread-tree-root">
     <section v-if="availableServers.length > 0" class="server-hierarchy-section">
       <SidebarMenuRow as="header" class="thread-tree-header-row">
-        <span class="thread-tree-header">Servers</span>
+        <span class="thread-tree-header">Explorer</span>
+        <template #right>
+          <div class="folder-actions">
+            <button class="folder-action-button" type="button" @click="expandAllFolders">Expand</button>
+            <button class="folder-action-button" type="button" @click="collapseAllFolders">Collapse</button>
+          </div>
+        </template>
       </SidebarMenuRow>
 
       <ul class="server-list">
@@ -11,19 +17,46 @@
           :key="server.id || server.label"
           class="server-row-item"
         >
-          <button
+          <SidebarMenuRow
+            as="div"
             class="server-row-button"
-            type="button"
-            :data-active="server.id === selectedServerId"
+            role="button"
+            tabindex="0"
+            :data-active="isServerSelected(server.id)"
             :title="server.description || server.label"
-            @click="onSelectServer(server.id)"
+            @click="onServerRowClick(server.id)"
+            @keydown.enter.prevent="onServerRowClick(server.id)"
+            @keydown.space.prevent="onServerRowClick(server.id)"
           >
+            <template #left>
+              <span class="project-icon-stack">
+                <span class="project-icon-folder">
+                  <IconTablerFolder v-if="isServerCollapsed(server.id)" class="thread-icon" />
+                  <IconTablerFolderOpen v-else class="thread-icon" />
+                </span>
+                <span class="project-icon-chevron">
+                  <IconTablerChevronRight v-if="isServerCollapsed(server.id)" class="thread-icon" />
+                  <IconTablerChevronDown v-else class="thread-icon" />
+                </span>
+              </span>
+            </template>
             <span class="server-row-label">{{ server.label }}</span>
-          </button>
+            <template #right>
+              <span v-if="isServerSelected(server.id)" class="server-row-active-tag">Active</span>
+            </template>
+          </SidebarMenuRow>
         </li>
       </ul>
     </section>
 
+    <SidebarMenuRow v-if="!isActiveServerExpanded" as="p" class="server-collapsed-row">
+      <template #left>
+        <span class="project-empty-spacer" />
+      </template>
+      <span class="project-empty">Server folder is collapsed</span>
+    </SidebarMenuRow>
+
+    <section v-else class="server-tree-children">
     <section v-if="pinnedThreads.length > 0" class="pinned-section">
       <ul class="thread-list">
         <li v-for="thread in pinnedThreads" :key="thread.id" class="thread-row-item">
@@ -308,6 +341,7 @@
           </SidebarMenuRow>
       </article>
     </div>
+    </section>
   </section>
 </template>
 
@@ -385,6 +419,7 @@ const DRAG_START_THRESHOLD_PX = 4
 const PROJECT_GROUP_EXPANDED_GAP_PX = 6
 const expandedProjects = ref<Record<string, boolean>>({})
 const collapsedProjects = ref<Record<string, boolean>>({})
+const collapsedServers = ref<Record<string, boolean>>({})
 const pinnedThreadIds = ref<string[]>([])
 const archiveConfirmThreadId = ref('')
 const openProjectMenuId = ref('')
@@ -416,12 +451,27 @@ const projectGroupResizeObserver =
       })
     : null
 const COLLAPSED_STORAGE_KEY = 'codex-web-local.collapsed-projects.v1'
+const COLLAPSED_SERVERS_STORAGE_KEY = 'codex-web-local.collapsed-servers.v1'
 
 function loadCollapsedState(): Record<string, boolean> {
   if (typeof window === 'undefined') return {}
 
   try {
     const raw = window.localStorage.getItem(COLLAPSED_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    return parsed as Record<string, boolean>
+  } catch {
+    return {}
+  }
+}
+
+function loadCollapsedServerState(): Record<string, boolean> {
+  if (typeof window === 'undefined') return {}
+
+  try {
+    const raw = window.localStorage.getItem(COLLAPSED_SERVERS_STORAGE_KEY)
     if (!raw) return {}
     const parsed = JSON.parse(raw) as unknown
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
@@ -439,12 +489,22 @@ function loadThreadViewMode(): 'project' | 'chronological' {
 }
 
 collapsedProjects.value = loadCollapsedState()
+collapsedServers.value = loadCollapsedServerState()
 
 watch(
   collapsedProjects,
   (value) => {
     if (typeof window === 'undefined') return
     window.localStorage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify(value))
+  },
+  { deep: true },
+)
+
+watch(
+  collapsedServers,
+  (value) => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(COLLAPSED_SERVERS_STORAGE_KEY, JSON.stringify(value))
   },
   { deep: true },
 )
@@ -478,6 +538,22 @@ const filteredGroups = computed<UiProjectGroup[]>(() => {
 })
 
 const isChronologicalView = computed(() => threadViewMode.value === 'chronological')
+
+function toServerKey(serverId: string): string {
+  const normalized = serverId.trim()
+  return normalized.length > 0 ? normalized : '__default__'
+}
+
+const selectedServerKey = computed(() => {
+  const selected = props.selectedServerId.trim()
+  if (selected.length > 0) {
+    return toServerKey(selected)
+  }
+  const firstServerId = props.availableServers[0]?.id ?? ''
+  return toServerKey(firstServerId)
+})
+
+const isActiveServerExpanded = computed(() => !isServerCollapsedByKey(selectedServerKey.value))
 
 const globalThreads = computed<UiThread[]>(() => {
   const sourceGroups = filteredGroups.value
@@ -602,8 +678,68 @@ function onSelect(threadId: string): void {
   emit('select', threadId)
 }
 
-function onSelectServer(serverId: string): void {
-  emit('select-server', serverId)
+function isServerCollapsedByKey(serverKey: string): boolean {
+  return collapsedServers.value[serverKey] === true
+}
+
+function isServerCollapsed(serverId: string): boolean {
+  return isServerCollapsedByKey(toServerKey(serverId))
+}
+
+function isServerSelected(serverId: string): boolean {
+  return selectedServerKey.value === toServerKey(serverId)
+}
+
+function onServerRowClick(serverId: string): void {
+  const serverKey = toServerKey(serverId)
+
+  if (!isServerSelected(serverId)) {
+    collapsedServers.value = {
+      ...collapsedServers.value,
+      [serverKey]: false,
+    }
+    emit('select-server', serverId)
+    return
+  }
+
+  collapsedServers.value = {
+    ...collapsedServers.value,
+    [serverKey]: !isServerCollapsedByKey(serverKey),
+  }
+}
+
+function expandAllFolders(): void {
+  const nextCollapsedServers = { ...collapsedServers.value }
+  for (const server of props.availableServers) {
+    nextCollapsedServers[toServerKey(server.id)] = false
+  }
+  collapsedServers.value = nextCollapsedServers
+
+  const nextCollapsedProjects = { ...collapsedProjects.value }
+  const nextExpandedProjects = { ...expandedProjects.value }
+  for (const group of props.groups) {
+    nextCollapsedProjects[group.projectName] = false
+    nextExpandedProjects[group.projectName] = true
+  }
+  collapsedProjects.value = nextCollapsedProjects
+  expandedProjects.value = nextExpandedProjects
+}
+
+function collapseAllFolders(): void {
+  const nextCollapsedServers = { ...collapsedServers.value }
+  for (const server of props.availableServers) {
+    nextCollapsedServers[toServerKey(server.id)] = true
+  }
+  collapsedServers.value = nextCollapsedServers
+
+  const nextCollapsedProjects = { ...collapsedProjects.value }
+  const nextExpandedProjects = { ...expandedProjects.value }
+  for (const group of props.groups) {
+    nextCollapsedProjects[group.projectName] = true
+    nextExpandedProjects[group.projectName] = false
+  }
+  collapsedProjects.value = nextCollapsedProjects
+  expandedProjects.value = nextExpandedProjects
 }
 
 function onArchiveClick(threadId: string): void {
@@ -1102,6 +1238,34 @@ function getThreadState(thread: UiThread): 'working' | 'unread' | 'idle' {
 }
 
 watch(
+  () => ({
+    selectedServerId: props.selectedServerId,
+    serverKeys: props.availableServers.map((server) => toServerKey(server.id)),
+  }),
+  ({ selectedServerId, serverKeys }) => {
+    if (serverKeys.length === 0) return
+
+    const activeServerKey = toServerKey(selectedServerId || props.availableServers[0]?.id || '')
+    if (isServerCollapsedByKey(activeServerKey)) {
+      collapsedServers.value = {
+        ...collapsedServers.value,
+        [activeServerKey]: false,
+      }
+    }
+
+    const serverKeySet = new Set(serverKeys)
+    const nextCollapsedServers = Object.fromEntries(
+      Object.entries(collapsedServers.value).filter(([serverKey]) => serverKeySet.has(serverKey)),
+    ) as Record<string, boolean>
+
+    if (Object.keys(nextCollapsedServers).length !== Object.keys(collapsedServers.value).length) {
+      collapsedServers.value = nextCollapsedServers
+    }
+  },
+  { immediate: true },
+)
+
+watch(
   () => props.groups.map((group) => group.projectName),
   (projectNames) => {
     const dragProjectName = activeProjectDrag.value?.projectName ?? pendingProjectDrag.value?.projectName ?? ''
@@ -1150,11 +1314,19 @@ onBeforeUnmount(() => {
 }
 
 .server-hierarchy-section {
-  @apply mb-2;
+  @apply mb-1;
+}
+
+.folder-actions {
+  @apply flex items-center gap-1;
+}
+
+.folder-action-button {
+  @apply h-5 rounded-md border border-zinc-200 px-1.5 text-[10px] font-medium uppercase tracking-[0.04em] text-zinc-500 transition hover:border-zinc-300 hover:bg-zinc-100 hover:text-zinc-700;
 }
 
 .server-list {
-  @apply list-none m-0 p-0 flex flex-col gap-1;
+  @apply list-none m-0 p-0 flex flex-col gap-0.5;
 }
 
 .server-row-item {
@@ -1162,7 +1334,7 @@ onBeforeUnmount(() => {
 }
 
 .server-row-button {
-  @apply w-full rounded-lg px-3 py-1.5 text-left transition bg-zinc-100/70 hover:bg-zinc-200;
+  @apply w-full rounded-lg transition bg-zinc-100/70 hover:bg-zinc-200 cursor-pointer;
 }
 
 .server-row-button[data-active='true'] {
@@ -1171,6 +1343,18 @@ onBeforeUnmount(() => {
 
 .server-row-label {
   @apply block text-sm font-medium truncate;
+}
+
+.server-row-active-tag {
+  @apply text-[10px] uppercase tracking-[0.06em] text-inherit/80;
+}
+
+.server-collapsed-row {
+  @apply py-1;
+}
+
+.server-tree-children {
+  @apply ml-3 pl-2 border-l border-zinc-200;
 }
 
 .pinned-section {
