@@ -1,5 +1,29 @@
 <template>
   <section class="thread-tree-root">
+    <section v-if="availableServers.length > 0" class="server-hierarchy-section">
+      <SidebarMenuRow as="header" class="thread-tree-header-row">
+        <span class="thread-tree-header">Servers</span>
+      </SidebarMenuRow>
+
+      <ul class="server-list">
+        <li
+          v-for="server in availableServers"
+          :key="server.id || server.label"
+          class="server-row-item"
+        >
+          <button
+            class="server-row-button"
+            type="button"
+            :data-active="server.id === selectedServerId"
+            :title="server.description || server.label"
+            @click="onSelectServer(server.id)"
+          >
+            <span class="server-row-label">{{ server.label }}</span>
+          </button>
+        </li>
+      </ul>
+    </section>
+
     <section v-if="pinnedThreads.length > 0" class="pinned-section">
       <ul class="thread-list">
         <li v-for="thread in pinnedThreads" :key="thread.id" class="thread-row-item">
@@ -302,15 +326,24 @@ import IconTablerGitFork from '../icons/IconTablerGitFork.vue'
 import IconTablerPin from '../icons/IconTablerPin.vue'
 import SidebarMenuRow from './SidebarMenuRow.vue'
 
+type ServerOption = {
+  id: string
+  label: string
+  description?: string
+}
+
 const props = defineProps<{
   groups: UiProjectGroup[]
   projectDisplayNameById: Record<string, string>
+  availableServers: ServerOption[]
+  selectedServerId: string
   selectedThreadId: string
   isLoading: boolean
   searchQuery: string
 }>()
 
 const emit = defineEmits<{
+  'select-server': [serverId: string]
   select: [threadId: string]
   archive: [threadId: string]
   'start-new-thread': [projectName: string]
@@ -567,6 +600,10 @@ function togglePin(threadId: string): void {
 
 function onSelect(threadId: string): void {
   emit('select', threadId)
+}
+
+function onSelectServer(serverId: string): void {
+  emit('select-server', serverId)
 }
 
 function onArchiveClick(threadId: string): void {
@@ -1110,6 +1147,30 @@ onBeforeUnmount(() => {
 
 .thread-tree-root {
   @apply flex flex-col;
+}
+
+.server-hierarchy-section {
+  @apply mb-2;
+}
+
+.server-list {
+  @apply list-none m-0 p-0 flex flex-col gap-1;
+}
+
+.server-row-item {
+  @apply m-0;
+}
+
+.server-row-button {
+  @apply w-full rounded-lg px-3 py-1.5 text-left transition bg-zinc-100/70 hover:bg-zinc-200;
+}
+
+.server-row-button[data-active='true'] {
+  @apply bg-zinc-900 text-white;
+}
+
+.server-row-label {
+  @apply block text-sm font-medium truncate;
 }
 
 .pinned-section {

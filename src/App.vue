@@ -68,8 +68,11 @@
 
         <SidebarThreadTree :groups="projectGroups" :project-display-name-by-id="projectDisplayNameById"
           v-if="!isSidebarCollapsed"
+          :available-servers="availableServers"
+          :selected-server-id="selectedServerId"
           :selected-thread-id="selectedThreadId" :is-loading="isLoadingThreads"
           :search-query="sidebarSearchQuery"
+          @select-server="onSelectServer"
           @select="onSelectThread"
           @archive="onArchiveThread" @start-new-thread="onStartNewThread" @rename-project="onRenameProject"
           @remove-project="onRemoveProject" @reorder-project="onReorderProject" />
@@ -107,11 +110,6 @@
                   {{ isLoggingOut ? 'Signing out…' : 'Sign out' }}
                 </button>
               </div>
-              <ServerPicker
-                :model-value="selectedServerId"
-                :options="availableServers"
-                @update:model-value="onSelectServer"
-              />
               <CwdPicker v-if="isHomeRoute" v-model="newThreadCwd" />
               <p v-else-if="headerCwdDisplay" class="header-cwd-readonly">{{ headerCwdDisplay }}</p>
             </div>
@@ -131,6 +129,16 @@
           </template>
           <template v-else-if="isHomeRoute">
             <div class="content-grid">
+              <div class="content-server-stack content-server-stack-home">
+                <ServerPicker
+                  :model-value="selectedServerId"
+                  :options="availableServers"
+                  mode="list"
+                  tone="hero"
+                  @update:model-value="onSelectServer"
+                />
+                <p class="new-thread-title">New thread</p>
+              </div>
               <div class="new-thread-empty">
                 <p class="new-thread-hero">Let's build</p>
               </div>
@@ -146,6 +154,15 @@
           </template>
           <template v-else>
             <div class="content-grid">
+              <div class="content-server-stack content-server-stack-thread">
+                <ServerPicker
+                  :model-value="selectedServerId"
+                  :options="availableServers"
+                  mode="list"
+                  tone="muted"
+                  @update:model-value="onSelectServer"
+                />
+              </div>
               <div class="content-thread">
                 <ThreadConversation :messages="filteredMessages" :is-loading="isLoadingMessages"
                   :active-thread-id="composerThreadContextId" :scroll-state="selectedThreadScrollState"
@@ -727,6 +744,18 @@ async function onLogout(): Promise<void> {
   @apply flex-1 min-h-0 flex flex-col gap-3;
 }
 
+.content-server-stack {
+  @apply px-3 sm:px-6 pt-0.5 flex flex-col gap-2;
+}
+
+.content-server-stack-home {
+  @apply text-zinc-950;
+}
+
+.content-server-stack-thread {
+  @apply text-zinc-500;
+}
+
 .content-thread {
   @apply flex-1 min-h-0;
 }
@@ -737,6 +766,10 @@ async function onLogout(): Promise<void> {
 
 .new-thread-empty {
   @apply flex-1 min-h-0 flex flex-col items-center justify-center gap-0.5 px-3 sm:px-6;
+}
+
+.new-thread-title {
+  @apply m-0 text-sm sm:text-base font-semibold text-zinc-950;
 }
 
 .new-thread-hero {
