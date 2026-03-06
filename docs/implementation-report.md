@@ -1,4 +1,4 @@
-# Multi-Stage Implementation Report (Phase 1 → Phase 4)
+# Multi-Stage Implementation Report (Phase 1 → Phase 5)
 
 ## Scope
 - Phase 1: Multi-server support
@@ -103,6 +103,61 @@
 
 ---
 
+## Phase 5 — Explicit registration, Settings, and connector package
+
+### Delivered
+- Explicit registration-only server model (no implicit local/default server).
+- Empty-state UX when no server or connector has been registered yet.
+- Per-user connector registry with one-time token issuance.
+- Automatic connector ↔ relay-server binding cleanup on rename/delete.
+- Connector stats API with `projectCount`, `threadCount`, `lastStatsAtIso`, and `statsStale`.
+- `/settings` route with connector create, rename, rotate-token, and delete flows.
+- `codexui-connector` CLI package with:
+  - `provision` for hub login + connector registration
+  - `connect` for outbound relay daemon mode
+  - local Codex app-server proxy loop and relay notification forwarding
+
+### Validation
+- `npm run build` ✅
+- `npm run test:multi-server` ✅
+- `npx playwright test tests/playwright/settings-connectors.spec.ts --reporter=line` ✅
+
+### Recent milestones
+- `f23f53e` Require explicit server registration
+- `41f1423` Add empty state for unregistered servers
+- `6f64043` Add per-user connector registry tokens
+- `b0bb993` Implement connector lifecycle and stats APIs
+- `3f8a7b4` Add settings UI for connector management
+
 ## Current status
-- Phase 1–4 implementation track is complete at transport + web-client integration level.
-- E2EE relay transport now has validated metadata, policy checks, and encrypted payload plumbing in place.
+- Phase 1–5 implementation track is complete at transport, onboarding, and settings-management level.
+- Hub users now have an explicit registration workflow for both local/relay servers and packaged outbound connectors.
+
+
+---
+
+## Phase 5 — Settings + Connector Package
+
+### Delivered
+- Explicit registration-only startup state (no implicit default/local server).
+- Per-user connector registry with bound relay server creation and cleanup.
+- Connector lifecycle APIs:
+  - create
+  - rename
+  - rotate token
+  - delete
+  - stats snapshot exposure
+- Dedicated `/settings` UI for connector management.
+- Packaged `codexui-connector` CLI with:
+  - `provision`
+  - `connect`
+- Connector install command generation and operator docs.
+
+### Validation
+- `npm run build` ✅
+- `npm run test:multi-server` ✅
+- `npx playwright test tests/playwright/settings-connectors.spec.ts --reporter=line` ✅
+
+### Notes
+- Connector status counts are derived through relay `thread/list` calls and cached per connector.
+- Offline connectors expose stale snapshots via `statsStale` so the UI can distinguish cached state from live state.

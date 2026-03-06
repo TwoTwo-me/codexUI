@@ -80,3 +80,57 @@ Optional environment variables:
 
 - Never store real auth tokens inside the repository tree.
 - Re-run `docker:multi-server:prepare-auth` whenever host auth tokens rotate.
+
+## 7) Settings UI verification
+
+```bash
+npx playwright test tests/playwright/settings-connectors.spec.ts --reporter=line
+```
+
+This spec verifies:
+- `/settings` route rendering
+- connector creation flow
+- one-time token visibility
+- rename flow
+- token rotation flow
+- delete flow
+- desktop screenshot capture into `.artifacts/screenshots/settings-connectors-desktop.png`
+
+## 8) Connector package contract verification
+
+`npm run test:multi-server` now includes the connector package contract test:
+- `tests/multi-server/relay-connector-package.test.mjs`
+
+The contract verifies:
+- the packaged `dist-cli/connector.js` entry is built
+- relay RPC requests are proxied into the local Codex app-server adapter
+- relay responses are pushed back to the hub transport
+- local notifications are forwarded as relay events
+
+
+## 7) Settings connector UI verification
+
+```bash
+npx playwright test tests/playwright/settings-connectors.spec.ts --reporter=line
+```
+
+This verifies:
+- `/settings` route rendering
+- connector creation
+- rename flow
+- token rotation
+- delete flow
+- screenshot capture to `.artifacts/screenshots/settings-connectors-desktop.png`
+
+## 8) Connector package contract tests
+
+```bash
+node --test tests/multi-server/relay-connector-package.test.mjs
+node --test tests/multi-server/connector-provisioning-package.test.mjs
+```
+
+These tests verify:
+- relay connector request/response forwarding
+- relay notification forwarding
+- hub login + connector provisioning
+- install command generation

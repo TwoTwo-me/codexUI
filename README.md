@@ -81,8 +81,13 @@ termux-wake-lock
 - 🌍 Cross-platform support for Linux, Windows, and Termux on Android
 - 🖥️ Browser-first Codex UI flow on `http://localhost:18923`
 - 🌐 LAN-friendly access from other devices on the same network
+- 🧭 Explicit server registration model (no surprise default server)
+- ⚙️ Settings screen for connector registration, status, rename, rotate-token, and delete
+- 🔌 Packaged `codexui-connector` CLI for outbound relay hosts
 - 🧪 Remote/headless-friendly setup for server-based Codex usage
 - 🔌 Works with reverse proxies and tunneling setups
+- 🔗 Dedicated Settings screen for connector registration, status, token rotation, and deletion
+- 🌐 Outbound relay connector package (`codexui-connector`) for remote server onboarding
 - ⚡ No global install required for quick experimentation
 - 🎙️ Built-in hold-to-dictate voice input with transcription to composer draft
 
@@ -109,6 +114,73 @@ termux-wake-lock
 
 - Multi-stage delivery report (Multi-server, Multi-user, Outbound relay, E2EE):  
   [`docs/implementation-report.md`](docs/implementation-report.md)
+
+
+## 🔗 Hub + Connector Onboarding
+
+CodexUI can now run as a central **hub** with user-scoped remote **connectors**.
+
+### From the web UI
+1. Open **Settings**
+2. Create a connector
+3. Copy the generated one-time install token / install command
+4. Run the connector on the remote host
+
+### From a terminal
+```bash
+npx codexui-connector provision   --hub https://hub.example.com   --username alice   --password 'your-password'   --connector edge-laptop   --name 'Alice Edge Laptop'
+```
+
+Then start the remote connector:
+
+```bash
+npx codexui-connector connect   --hub https://hub.example.com   --token '<one-time-token>'   --connector edge-laptop
+```
+
+Detailed guides:
+- [`docs/settings-and-connectors.md`](docs/settings-and-connectors.md)
+- [`docs/connector-package.md`](docs/connector-package.md)
+
+## ⚙️ Settings + Connector Onboarding
+
+CodexUI now uses an **explicit registration** model:
+- no local/default server is auto-created
+- a fresh account starts empty
+- you register a server or connector before opening projects and threads
+
+### Browser flow
+
+1. Sign in to the hub.
+2. Open **Settings** in the sidebar.
+3. Create a connector.
+4. Copy the one-time token or the suggested install command.
+5. Run the connector on the target host.
+
+### Connector CLI flow
+
+Provision from a remote host:
+
+```bash
+node dist-cli/connector.js provision \
+  --hub http://127.0.0.1:4300 \
+  --username admin \
+  --password admin \
+  --connector build-runner \
+  --name "Build Runner"
+```
+
+Connect with an issued token:
+
+```bash
+node dist-cli/connector.js connect \
+  --hub http://127.0.0.1:4300 \
+  --token <one-time-token> \
+  --connector build-runner
+```
+
+More details:
+- [`docs/settings-and-connectors.md`](docs/settings-and-connectors.md)
+- [`docs/connector-package.md`](docs/connector-package.md)
 
 ---
 
@@ -147,15 +219,18 @@ termux-wake-lock
 ┌─────────────────────────────┐
 │  Browser (Desktop/Mobile)   │
 └──────────────┬──────────────┘
-               │ HTTP/WebSocket
+               │ HTTP / SSE
 ┌──────────────▼──────────────┐
-│         codexapp            │
-│  (Express + Vue UI bridge)  │
-└──────────────┬──────────────┘
-               │ RPC/Bridge calls
-┌──────────────▼──────────────┐
-│      Codex App Server       │
-└─────────────────────────────┘
+│       CodexUI Hub           │
+│ (Express + Vue + Relay Hub) │
+└───────┬───────────┬─────────┘
+        │           │
+        │ local     │ outbound relay
+        ▼           ▼
+┌──────────────┐  ┌──────────────────────┐
+│ Codex server │  │ codexui-connector    │
+│ (local)      │  │ + Codex app-server   │
+└──────────────┘  └──────────────────────┘
 ```
 
 ---
