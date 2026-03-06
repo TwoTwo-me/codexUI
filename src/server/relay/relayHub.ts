@@ -156,7 +156,23 @@ export class OutboundRelayHub {
       .sort((left, right) => left.name.localeCompare(right.name))
   }
 
-  createAgent(name?: string): { agent: RelayAgentPublicRecord; token: string } {
+  getAgent(agentId: string): RelayAgentPublicRecord | null {
+    const record = this.agentsById.get(agentId)
+    if (!record) return null
+    return toPublicAgentRecord(record, this.sessionIdByAgentId.has(agentId))
+  }
+
+  upsertPersistedAgent(agent: RelayAgentRecord): RelayAgentPublicRecord {
+    const existing = this.agentsById.get(agent.id)
+    const merged: RelayAgentRecord = {
+      ...agent,
+      ...(existing?.lastSeenAtIso ? { lastSeenAtIso: existing.lastSeenAtIso } : {}),
+    }
+    this.agentsById.set(agent.id, merged)
+    return toPublicAgentRecord(merged, this.sessionIdByAgentId.has(agent.id))
+  }
+
+  createAgent(name?: string): { agent: RelayAgentPublicRecord; token: string; tokenHash: string } {
     const nowIso = new Date().toISOString()
     const token = createSecretToken()
     const tokenHash = hashToken(token)
@@ -181,6 +197,7 @@ export class OutboundRelayHub {
     return {
       agent: toPublicAgentRecord(record, false),
       token,
+      tokenHash,
     }
   }
 

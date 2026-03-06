@@ -96,6 +96,31 @@ type ServerRegistryState = {
   servers: CodexServerRecord[]
 }
 
+type CodexConnectorRecord = {
+  id: string
+  name: string
+  hubAddress: string
+  relayAgentId: string
+  tokenHash: string
+  createdAtIso: string
+  updatedAtIso: string
+}
+
+type CodexConnectorPublicRecord = {
+  id: string
+  name: string
+  hubAddress: string
+  relayAgentId: string
+  createdAtIso: string
+  updatedAtIso: string
+  connected: boolean
+  lastSeenAtIso?: string
+}
+
+type ConnectorRegistryState = {
+  connectors: CodexConnectorRecord[]
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -465,8 +490,11 @@ function getCodexGlobalStatePath(): string {
 
 const SERVER_REGISTRY_STATE_KEY = 'codexui-server-registry'
 const SERVER_REGISTRY_STATE_BY_USER_KEY = 'codexui-server-registry-by-user'
+const CONNECTOR_REGISTRY_STATE_KEY = 'codexui-connector-registry'
+const CONNECTOR_REGISTRY_STATE_BY_USER_KEY = 'codexui-connector-registry-by-user'
 const MAX_SERVER_ID_LENGTH = 64
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+const CONNECTOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const RELAY_AGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const LEGACY_RELAY_AGENT_ID_PATTERN = /^agent:([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/u
 const RELAY_E2EE_KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
@@ -482,6 +510,7 @@ const RELAY_AGENT_RATE_LIMIT_MAX_PER_IP = 4_000
 const RELAY_AGENT_RATE_LIMIT_MAX_PER_CLIENT_KEY = 480
 const RELAY_AGENT_RATE_LIMIT_MAX_ENTRIES = 4096
 const cachedServerRegistryStateByScope = new Map<string, ServerRegistryState>()
+const cachedConnectorRegistryStateByScope = new Map<string, ConnectorRegistryState>()
 
 type ServerRegistryScope = {
   cacheKey: string
@@ -508,8 +537,24 @@ function cloneServerRegistryState(state: ServerRegistryState): ServerRegistrySta
   }
 }
 
+function cloneConnectorRecord(record: CodexConnectorRecord): CodexConnectorRecord {
+  return {
+    ...record,
+  }
+}
+
+function cloneConnectorRegistryState(state: ConnectorRegistryState): ConnectorRegistryState {
+  return {
+    connectors: state.connectors.map(cloneConnectorRecord),
+  }
+}
+
 export function isValidServerId(value: string): boolean {
   return SERVER_ID_PATTERN.test(value)
+}
+
+function isValidConnectorId(value: string): boolean {
+  return CONNECTOR_ID_PATTERN.test(value)
 }
 
 function isValidRelayAgentId(value: string): boolean {
@@ -655,6 +700,65 @@ export function normalizeServerRegistryState(value: unknown, nowIso = new Date()
   }
 }
 
+function normalizeConnectorRecord(value: unknown, nowIso: string): CodexConnectorRecord | null {
+  const record = asRecord(value)
+  if (!record) return null
+
+  const id = typeof record.id === 'string' ? record.id.trim() : ''
+  if (!isValidConnectorId(id)) {
+    return null
+  }
+
+  const relayAgentId = normalizeRelayAgentId(record.relayAgentId)
+  if (!relayAgentId) {
+    return null
+  }
+
+  const tokenHash = typeof record.tokenHash === 'string' ? record.tokenHash.trim() : ''
+  if (!tokenHash) {
+    return null
+  }
+
+  const name = typeof record.name === 'string' && record.name.trim().length > 0
+    ? record.name.trim()
+    : id
+  const hubAddress = typeof record.hubAddress === 'string' && record.hubAddress.trim().length > 0
+    ? record.hubAddress.trim()
+    : ''
+  const createdAtIso = typeof record.createdAtIso === 'string' && record.createdAtIso.trim().length > 0
+    ? record.createdAtIso.trim()
+    : nowIso
+  const updatedAtIso = typeof record.updatedAtIso === 'string' && record.updatedAtIso.trim().length > 0
+    ? record.updatedAtIso.trim()
+    : createdAtIso
+
+  return {
+    id,
+    name,
+    hubAddress,
+    relayAgentId,
+    tokenHash,
+    createdAtIso,
+    updatedAtIso,
+  }
+}
+
+function normalizeConnectorRegistryState(value: unknown, nowIso = new Date().toISOString()): ConnectorRegistryState {
+  const record = asRecord(value)
+  const rawConnectors = Array.isArray(record?.connectors) ? record.connectors : []
+  const connectorsById = new Map<string, CodexConnectorRecord>()
+
+  for (const item of rawConnectors) {
+    const normalized = normalizeConnectorRecord(item, nowIso)
+    if (!normalized || connectorsById.has(normalized.id)) continue
+    connectorsById.set(normalized.id, normalized)
+  }
+
+  return {
+    connectors: Array.from(connectorsById.values()),
+  }
+}
+
 async function readCodexGlobalStatePayload(): Promise<Record<string, unknown>> {
   const statePath = getCodexGlobalStatePath()
   try {
@@ -758,6 +862,100 @@ async function writeServerRegistryState(scope: ServerRegistryScope, nextState: S
   cachedServerRegistryStateByScope.set(scope.cacheKey, cloneServerRegistryState(normalized))
 }
 
+function readScopedConnectorRegistryRawValue(
+  payload: Record<string, unknown>,
+  scope: ServerRegistryScope,
+): { rawValue: unknown } {
+  if (!scope.userId) {
+    return {
+      rawValue: payload[CONNECTOR_REGISTRY_STATE_KEY],
+    }
+  }
+
+  const scopedPayload = asRecord(payload[CONNECTOR_REGISTRY_STATE_BY_USER_KEY])
+  if (scopedPayload && Object.prototype.hasOwnProperty.call(scopedPayload, scope.userId)) {
+    return {
+      rawValue: scopedPayload[scope.userId],
+    }
+  }
+
+  if (scopedPayload && Object.keys(scopedPayload).length > 0) {
+    return {
+      rawValue: undefined,
+    }
+  }
+
+  return {
+    rawValue: payload[CONNECTOR_REGISTRY_STATE_KEY],
+  }
+}
+
+async function readConnectorRegistryState(
+  scope: ServerRegistryScope,
+  options: { persistNormalized?: boolean } = {},
+): Promise<ConnectorRegistryState> {
+  const cachedState = cachedConnectorRegistryStateByScope.get(scope.cacheKey)
+  if (cachedState && options.persistNormalized !== true) {
+    return cloneConnectorRegistryState(cachedState)
+  }
+
+  const payload = await readCodexGlobalStatePayload()
+  const { rawValue } = readScopedConnectorRegistryRawValue(payload, scope)
+  const normalized = normalizeConnectorRegistryState(rawValue)
+  cachedConnectorRegistryStateByScope.set(scope.cacheKey, cloneConnectorRegistryState(normalized))
+
+  const shouldPersist = options.persistNormalized === true
+    && JSON.stringify(rawValue) !== JSON.stringify(normalized)
+  if (shouldPersist) {
+    if (!scope.userId) {
+      payload[CONNECTOR_REGISTRY_STATE_KEY] = normalized
+    } else {
+      const currentByUser = asRecord(payload[CONNECTOR_REGISTRY_STATE_BY_USER_KEY]) ?? {}
+      currentByUser[scope.userId] = normalized
+      payload[CONNECTOR_REGISTRY_STATE_BY_USER_KEY] = currentByUser
+    }
+    await writeCodexGlobalStatePayload(payload)
+  }
+
+  return cloneConnectorRegistryState(normalized)
+}
+
+async function writeConnectorRegistryState(scope: ServerRegistryScope, nextState: ConnectorRegistryState): Promise<void> {
+  const payload = await readCodexGlobalStatePayload()
+  const normalized = normalizeConnectorRegistryState(nextState)
+
+  if (!scope.userId) {
+    payload[CONNECTOR_REGISTRY_STATE_KEY] = normalized
+  } else {
+    const currentByUser = asRecord(payload[CONNECTOR_REGISTRY_STATE_BY_USER_KEY]) ?? {}
+    currentByUser[scope.userId] = normalized
+    payload[CONNECTOR_REGISTRY_STATE_BY_USER_KEY] = currentByUser
+  }
+
+  await writeCodexGlobalStatePayload(payload)
+  cachedConnectorRegistryStateByScope.set(scope.cacheKey, cloneConnectorRegistryState(normalized))
+}
+
+function listPersistedConnectorRecords(payload: Record<string, unknown>): CodexConnectorRecord[] {
+  const recordsById = new Map<string, CodexConnectorRecord>()
+  const nowIso = new Date().toISOString()
+
+  const globalRegistry = normalizeConnectorRegistryState(payload[CONNECTOR_REGISTRY_STATE_KEY], nowIso)
+  for (const connector of globalRegistry.connectors) {
+    recordsById.set(connector.relayAgentId, connector)
+  }
+
+  const perUserPayload = asRecord(payload[CONNECTOR_REGISTRY_STATE_BY_USER_KEY]) ?? {}
+  for (const rawRegistry of Object.values(perUserPayload)) {
+    const registry = normalizeConnectorRegistryState(rawRegistry, nowIso)
+    for (const connector of registry.connectors) {
+      recordsById.set(connector.relayAgentId, connector)
+    }
+  }
+
+  return Array.from(recordsById.values())
+}
+
 function buildServerIdSeed(value: string): string {
   const lowered = value.toLowerCase().trim()
   const collapsed = lowered
@@ -789,6 +987,63 @@ function buildUniqueServerId(seed: string, taken: Set<string>): string {
   }
 
   throw new Error('Failed to generate unique server id')
+}
+
+function normalizeHubAddress(value: unknown): string {
+  const rawValue = typeof value === 'string' ? value.trim() : ''
+  if (!rawValue) return ''
+
+  try {
+    const parsed = new URL(rawValue)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return ''
+    }
+    parsed.hash = ''
+    parsed.search = ''
+    parsed.pathname = parsed.pathname.replace(/\/+$/u, '') || '/'
+    return parsed.toString().replace(/\/$/u, '')
+  } catch {
+    return ''
+  }
+}
+
+function inferHubAddress(req: IncomingMessage): string {
+  const forwardedProto = getSingleHeaderValue(req.headers['x-forwarded-proto'])
+  const socketEncrypted = (req.socket as { encrypted?: boolean }).encrypted === true
+  const protocol = forwardedProto || (socketEncrypted ? 'https' : 'http')
+  const host = getSingleHeaderValue(req.headers.host)
+  if (!host) return ''
+  return normalizeHubAddress(`${protocol}://${host}`)
+}
+
+function toPublicConnectorRecord(
+  connector: CodexConnectorRecord,
+  relayHub: OutboundRelayHub,
+): CodexConnectorPublicRecord {
+  const relayAgent = relayHub.getAgent(connector.relayAgentId)
+  return {
+    id: connector.id,
+    name: connector.name,
+    hubAddress: connector.hubAddress,
+    relayAgentId: connector.relayAgentId,
+    createdAtIso: connector.createdAtIso,
+    updatedAtIso: connector.updatedAtIso,
+    connected: relayAgent?.connected ?? false,
+    ...(relayAgent?.lastSeenAtIso ? { lastSeenAtIso: relayAgent.lastSeenAtIso } : {}),
+  }
+}
+
+async function syncRelayHubPersistedAgents(relayHub: OutboundRelayHub): Promise<void> {
+  const payload = await readCodexGlobalStatePayload()
+  for (const connector of listPersistedConnectorRecords(payload)) {
+    relayHub.upsertPersistedAgent({
+      id: connector.relayAgentId,
+      name: connector.name,
+      tokenHash: connector.tokenHash,
+      createdAtIso: connector.createdAtIso,
+      updatedAtIso: connector.updatedAtIso,
+    })
+  }
 }
 
 function parseServerResourceId(pathname: string): string | null {
@@ -1999,8 +2254,99 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         return
       }
 
+      if (req.method === 'GET' && url.pathname === '/codex-api/connectors') {
+        const authenticatedUser = getRequestAuthenticatedUser(req)
+        if (!authenticatedUser) {
+          setJson(res, 401, { error: 'Authentication required' })
+          return
+        }
+
+        await syncRelayHubPersistedAgents(relayHub)
+        const registry = await readConnectorRegistryState(registryScope, { persistNormalized: true })
+        setJson(res, 200, {
+          data: {
+            connectors: registry.connectors.map((connector) => toPublicConnectorRecord(connector, relayHub)),
+          },
+        })
+        return
+      }
+
+      if (req.method === 'POST' && url.pathname === '/codex-api/connectors') {
+        const authenticatedUser = getRequestAuthenticatedUser(req)
+        if (!authenticatedUser) {
+          setJson(res, 401, { error: 'Authentication required' })
+          return
+        }
+
+        const payload = asRecord(await readJsonBody(req))
+        if (!payload) {
+          setJson(res, 400, { error: 'Invalid body: expected object' })
+          return
+        }
+
+        const connectorId = typeof payload.id === 'string' ? payload.id.trim() : ''
+        if (!connectorId) {
+          setJson(res, 400, { error: 'Explicit connector id is required' })
+          return
+        }
+        if (!isValidConnectorId(connectorId)) {
+          setJson(res, 400, { error: `Invalid connector id "${connectorId}"` })
+          return
+        }
+
+        const registry = await readConnectorRegistryState(registryScope, { persistNormalized: true })
+        if (registry.connectors.some((connector) => connector.id === connectorId)) {
+          setJson(res, 409, { error: `Connector "${connectorId}" already exists` })
+          return
+        }
+
+        const name = typeof payload.name === 'string' && payload.name.trim().length > 0
+          ? payload.name.trim()
+          : connectorId
+        const hubAddress = normalizeHubAddress(payload.hubAddress) || inferHubAddress(req)
+        if (!hubAddress) {
+          setJson(res, 400, { error: 'Valid hubAddress is required' })
+          return
+        }
+
+        const created = relayHub.createAgent(name)
+        const connector: CodexConnectorRecord = {
+          id: connectorId,
+          name,
+          hubAddress,
+          relayAgentId: created.agent.id,
+          tokenHash: created.tokenHash,
+          createdAtIso: created.agent.createdAtIso,
+          updatedAtIso: created.agent.updatedAtIso,
+        }
+        const nextState: ConnectorRegistryState = {
+          connectors: [...registry.connectors, connector],
+        }
+        await writeConnectorRegistryState(registryScope, nextState)
+        relayHub.upsertPersistedAgent({
+          id: connector.relayAgentId,
+          name: connector.name,
+          tokenHash: connector.tokenHash,
+          createdAtIso: connector.createdAtIso,
+          updatedAtIso: connector.updatedAtIso,
+        })
+        setJson(res, 201, {
+          data: {
+            connector: toPublicConnectorRecord(connector, relayHub),
+            token: created.token,
+          },
+        })
+        return
+      }
+
+      if (url.pathname === '/codex-api/connectors') {
+        setJson(res, 405, { error: 'Method not allowed' })
+        return
+      }
+
       if (req.method === 'GET' && url.pathname === '/codex-api/relay/agents') {
         requireAdminUser(req)
+        await syncRelayHubPersistedAgents(relayHub)
         setJson(res, 200, { data: relayHub.listAgents() })
         return
       }
@@ -2011,7 +2357,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const payload = asRecord(await readJsonBody(req))
         const name = typeof payload?.name === 'string' ? payload.name : undefined
         const created = relayHub.createAgent(name)
-        setJson(res, 201, { data: created })
+        setJson(res, 201, { data: { agent: created.agent, token: created.token } })
         return
       }
 
@@ -2020,6 +2366,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           if (!enforceRelayRateLimit(req, res)) {
             return
           }
+          await syncRelayHubPersistedAgents(relayHub)
           const token = readBearerToken(req)
           const connected = relayHub.connectWithToken(token)
           setJson(res, 200, { data: connected })

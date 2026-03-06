@@ -6,6 +6,7 @@ const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const RELAY_AGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const LEGACY_RELAY_AGENT_ID_PATTERN = /^agent:([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/u
 const RELAY_E2EE_KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
+const CONNECTOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const RELAY_E2EE_ALGORITHM = 'aes-256-gcm'
 const DEFAULT_RELAY_PROTOCOL = 'relay-http-v1'
 const DEFAULT_RELAY_TIMEOUT_MS = 60_000
@@ -180,10 +181,12 @@ function publicUserRecord(user) {
 export function createMultiUserContractApi() {
   let nextUserNumber = 1
   let nextSessionNumber = 1
+  let nextConnectorNumber = 1
 
   const usersByUsername = new Map()
   const sessionsByToken = new Map()
   const registryByUserId = new Map()
+  const connectorsByUserId = new Map()
 
   function resolveSessionUser(headers) {
     const cookieHeader = getHeaderValue(headers, 'cookie')
@@ -212,6 +215,16 @@ export function createMultiUserContractApi() {
       servers: [],
     }
     registryByUserId.set(userId, created)
+    return created
+  }
+
+  function getConnectorRegistry(userId) {
+    const existing = connectorsByUserId.get(userId)
+    if (existing) {
+      return existing
+    }
+    const created = []
+    connectorsByUserId.set(userId, created)
     return created
   }
 
@@ -395,6 +408,83 @@ export function createMultiUserContractApi() {
             data: {
               server: { ...nextServer },
               registry: cloneRegistry(nextState),
+            },
+          })
+        }
+
+        return jsonResponse(405, { error: 'Method not allowed' })
+      }
+
+      if (url.pathname === '/codex-api/connectors') {
+        const user = resolveSessionUser(request?.headers)
+        if (!user) {
+          return jsonResponse(401, { error: 'Unauthorized' })
+        }
+
+        if (method === 'GET') {
+          const connectors = getConnectorRegistry(user.id).map((connector) => ({
+            id: connector.id,
+            name: connector.name,
+            hubAddress: connector.hubAddress,
+            relayAgentId: connector.relayAgentId,
+            createdAtIso: connector.createdAtIso,
+            updatedAtIso: connector.updatedAtIso,
+            connected: false,
+          }))
+          return jsonResponse(200, { data: { connectors } })
+        }
+
+        if (method === 'POST') {
+          const payload = parseJsonBody(request?.body)
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            return jsonResponse(400, { error: 'Invalid body: expected object' })
+          }
+
+          const connectorId = typeof payload.id === 'string' ? payload.id.trim() : ''
+          if (!connectorId) {
+            return jsonResponse(400, { error: 'Explicit connector id is required' })
+          }
+          if (!CONNECTOR_ID_PATTERN.test(connectorId)) {
+            return jsonResponse(400, { error: `Invalid connector id "${connectorId}"` })
+          }
+
+          const connectors = getConnectorRegistry(user.id)
+          if (connectors.some((connector) => connector.id === connectorId)) {
+            return jsonResponse(409, { error: `Connector "${connectorId}" already exists` })
+          }
+
+          const name = typeof payload.name === 'string' && payload.name.trim().length > 0
+            ? payload.name.trim()
+            : `Connector ${String(connectors.length + 1)}`
+          const hubAddress = typeof payload.hubAddress === 'string' && payload.hubAddress.trim().length > 0
+            ? payload.hubAddress.trim()
+            : 'https://hub.invalid'
+          const nowIso = new Date().toISOString()
+          const token = `connector-token-${randomBytes(12).toString('hex')}`
+          const connector = {
+            id: connectorId,
+            name,
+            hubAddress,
+            relayAgentId: `agent-${String(nextConnectorNumber)}`,
+            createdAtIso: nowIso,
+            updatedAtIso: nowIso,
+            tokenHash: hashSecret(token),
+          }
+          nextConnectorNumber += 1
+          connectors.push(connector)
+
+          return jsonResponse(201, {
+            data: {
+              connector: {
+                id: connector.id,
+                name: connector.name,
+                hubAddress: connector.hubAddress,
+                relayAgentId: connector.relayAgentId,
+                createdAtIso: connector.createdAtIso,
+                updatedAtIso: connector.updatedAtIso,
+                connected: false,
+              },
+              token,
             },
           })
         }
