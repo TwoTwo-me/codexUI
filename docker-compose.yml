@@ -1,0 +1,33 @@
+name: codexui-hub
+
+services:
+  hub:
+    container_name: ${CODEXUI_CONTAINER_NAME:-codexui-hub}
+    image: ${CODEXUI_IMAGE:-codexui-hub:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CODEX_CLI_VERSION: ${CODEXUI_CODEX_CLI_VERSION:-0.110.0}
+    restart: ${CODEXUI_RESTART_POLICY:-unless-stopped}
+    environment:
+      CODEX_HOME: /data/codex-home
+      CODEXUI_BIND_HOST: ${CODEXUI_BIND_HOST:-0.0.0.0}
+      CODEXUI_PORT: ${CODEXUI_PORT:-4300}
+      CODEXUI_PASSWORD_MODE: ${CODEXUI_PASSWORD_MODE:-required}
+      CODEXUI_PASSWORD: ${CODEXUI_PASSWORD:-admin}
+    ports:
+      - "${CODEXUI_PORT:-4300}:${CODEXUI_PORT:-4300}"
+    volumes:
+      - ${CODEXUI_DATA_DIR:-./docker/data}:/data
+      - ${CODEXUI_CODEX_AUTH_FILE:-./docker/secrets/codex-auth.json}:/data/codex-home/auth.json:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:' + (process.env.CODEXUI_PORT || '4300') + '/auth/session', { headers: { Accept: 'application/json' } }).then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s

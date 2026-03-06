@@ -43,7 +43,12 @@
     "docker:multi-server:prepare-auth": "bash scripts/docker/prepare-codex-auth.sh",
     "docker:multi-server:up": "bash scripts/docker/multi-server-up.sh",
     "docker:multi-server:smoke": "bash scripts/docker/multi-server-smoke.sh",
-    "docker:multi-server:down": "bash scripts/docker/multi-server-down.sh"
+    "docker:multi-server:down": "bash scripts/docker/multi-server-down.sh",
+    "docker:hub:build": "docker compose build hub",
+    "docker:hub:up": "docker compose up --build -d hub",
+    "docker:hub:down": "docker compose down --remove-orphans",
+    "docker:hub:logs": "docker compose logs -f hub",
+    "docker:hub:smoke": "bash scripts/docker/hub-smoke.sh"
   },
   "dependencies": {
     "commander": "^13.1.0",

@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-cli
+test-results
+playwright-report
+.artifacts
+.omx
+artifacts
+docker/data
+docker/secrets
+scripts/verify_server_ui.mjs
+.git
