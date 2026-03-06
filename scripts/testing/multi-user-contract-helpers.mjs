@@ -11,6 +11,34 @@ const RELAY_E2EE_ALGORITHM = 'aes-256-gcm'
 const DEFAULT_RELAY_PROTOCOL = 'relay-http-v1'
 const DEFAULT_RELAY_TIMEOUT_MS = 60_000
 
+function isLoopbackHostname(hostname) {
+  const normalized = String(hostname ?? '').trim().toLowerCase().replace(/^\[/u, '').replace(/\]$/u, '')
+  return normalized === 'localhost'
+    || normalized === '::1'
+    || normalized === '127.0.0.1'
+    || normalized.startsWith('127.')
+}
+
+function normalizeHubAddress(value) {
+  const rawValue = typeof value === 'string' ? value.trim() : ''
+  if (!rawValue) return ''
+  try {
+    const parsed = new URL(rawValue)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return ''
+    }
+    if (parsed.protocol === 'http:' && !isLoopbackHostname(parsed.hostname)) {
+      return ''
+    }
+    parsed.hash = ''
+    parsed.search = ''
+    parsed.pathname = parsed.pathname.replace(/\/+$/u, '') || '/'
+    return parsed.toString().replace(/\/$/u, '')
+  } catch {
+    return ''
+  }
+}
+
 function hashSecret(secret) {
   return createHash('sha256').update(secret).digest('hex')
 }
@@ -497,9 +525,10 @@ export function createMultiUserContractApi() {
           const name = typeof payload.name === 'string' && payload.name.trim().length > 0
             ? payload.name.trim()
             : `Connector ${String(connectors.length + 1)}`
-          const hubAddress = typeof payload.hubAddress === 'string' && payload.hubAddress.trim().length > 0
-            ? payload.hubAddress.trim()
-            : 'https://hub.invalid'
+          const hubAddress = normalizeHubAddress(payload.hubAddress)
+          if (!hubAddress) {
+            return jsonResponse(400, { error: 'Valid hubAddress is required. Use HTTPS for non-local hubs.' })
+          }
           const nowIso = new Date().toISOString()
           const token = `connector-token-${randomBytes(12).toString('hex')}`
           const connector = {
@@ -632,6 +661,10 @@ export function createMultiUserContractApi() {
                 createdAtIso: connector.createdAtIso,
                 updatedAtIso: connector.updatedAtIso,
                 connected: false,
+                ...(connector.lastKnownProjectCount !== undefined ? { projectCount: connector.lastKnownProjectCount } : {}),
+                ...(connector.lastKnownThreadCount !== undefined ? { threadCount: connector.lastKnownThreadCount } : {}),
+                ...(connector.lastStatsAtIso ? { lastStatsAtIso: connector.lastStatsAtIso } : {}),
+                statsStale: connector.connected === true ? false : connector.lastStatsAtIso !== undefined,
               })),
             },
           })

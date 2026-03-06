@@ -161,3 +161,4 @@
 ### Notes
 - Connector status counts are derived through relay `thread/list` calls and cached per connector.
 - Offline connectors expose stale snapshots via `statsStale` so the UI can distinguish cached state from live state.
+- Suggested install commands now use `--token-file`, and non-local hubs require HTTPS by default.

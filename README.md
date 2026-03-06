@@ -123,18 +123,30 @@ CodexUI can now run as a central **hub** with user-scoped remote **connectors**.
 ### From the web UI
 1. Open **Settings**
 2. Create a connector
-3. Copy the generated one-time install token / install command
-4. Run the connector on the remote host
+3. Reveal the one-time token and save it to a secure file on the remote host
+4. Run the suggested `--token-file` install command
 
 ### From a terminal
 ```bash
-npx codexui-connector provision   --hub https://hub.example.com   --username alice   --password 'your-password'   --connector edge-laptop   --name 'Alice Edge Laptop'
+read -sr CODEXUI_HUB_PASSWORD && printf '%s' "$CODEXUI_HUB_PASSWORD" | \
+  npx codexui-connector provision \
+    --hub https://hub.example.com \
+    --username alice \
+    --password-stdin \
+    --connector edge-laptop \
+    --name 'Alice Edge Laptop'
 ```
 
-Then start the remote connector:
+Then save the issued token to a secure file and start the remote connector:
 
 ```bash
-npx codexui-connector connect   --hub https://hub.example.com   --token '<one-time-token>'   --connector edge-laptop
+install -d -m 700 ~/.codexui-connector
+printf '%s' '<one-time-token>' > ~/.codexui-connector/edge-laptop.token
+chmod 600 ~/.codexui-connector/edge-laptop.token
+npx codexui-connector connect \
+  --hub https://hub.example.com \
+  --connector edge-laptop \
+  --token-file ~/.codexui-connector/edge-laptop.token
 ```
 
 Detailed guides:
@@ -153,29 +165,33 @@ CodexUI now uses an **explicit registration** model:
 1. Sign in to the hub.
 2. Open **Settings** in the sidebar.
 3. Create a connector.
-4. Copy the one-time token or the suggested install command.
-5. Run the connector on the target host.
+4. Reveal the one-time token and save it to a secure file on the target host.
+5. Run the suggested `--token-file` command.
 
 ### Connector CLI flow
 
 Provision from a remote host:
 
 ```bash
+read -sr CODEXUI_HUB_PASSWORD && printf '%s' "$CODEXUI_HUB_PASSWORD" | \
 node dist-cli/connector.js provision \
-  --hub http://127.0.0.1:4300 \
+  --hub https://hub.example.com \
   --username admin \
-  --password admin \
+  --password-stdin \
   --connector build-runner \
   --name "Build Runner"
 ```
 
-Connect with an issued token:
+Connect with an issued token saved to a file:
 
 ```bash
+install -d -m 700 ~/.codexui-connector
+printf '%s' '<one-time-token>' > ~/.codexui-connector/build-runner.token
+chmod 600 ~/.codexui-connector/build-runner.token
 node dist-cli/connector.js connect \
-  --hub http://127.0.0.1:4300 \
-  --token <one-time-token> \
-  --connector build-runner
+  --hub https://hub.example.com \
+  --connector build-runner \
+  --token-file ~/.codexui-connector/build-runner.token
 ```
 
 More details:

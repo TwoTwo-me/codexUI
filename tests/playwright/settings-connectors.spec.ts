@@ -203,10 +203,11 @@ test('settings page manages connectors end-to-end', async ({ page }) => {
 
     if (route.request().method().toUpperCase() === 'DELETE') {
       connectors = connectors.filter((connector) => connector.id !== connectorId)
+      const deleteResponseRows = connectors.map(({ projectCount, threadCount, lastStatsAtIso, statsStale, ...connector }) => connector)
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ ok: true, data: { connectors } }),
+        body: JSON.stringify({ ok: true, data: { connectors: deleteResponseRows } }),
       })
       return
     }
@@ -231,6 +232,7 @@ test('settings page manages connectors end-to-end', async ({ page }) => {
   await expect(page.getByText('Installation token is only shown once.')).toBeVisible()
   await expect(page.getByText('alpha-laptop')).toBeVisible()
   await expect(page.locator('input[value="Alpha Laptop"]').first()).toBeVisible()
+  await expect(page.getByLabel('Suggested install command')).toHaveValue(/--token-file/)
 
   await page.getByRole('button', { name: 'Edit name' }).click()
   await page.getByLabel('Rename connector').fill('Alpha Laptop Renamed')
@@ -238,11 +240,15 @@ test('settings page manages connectors end-to-end', async ({ page }) => {
   await expect(page.getByText('Alpha Laptop Renamed')).toBeVisible()
 
   await page.getByRole('button', { name: 'Rotate token' }).click()
-  await expect(page.getByText('rotated-')).toBeVisible()
+  await page.getByText('Reveal token').click()
+  await expect(page.locator('.settings-install-card .settings-code-block').first()).toHaveValue(/rotated-/)
 
   await page.getByRole('button', { name: 'Delete connector' }).click()
   await page.getByRole('button', { name: 'Confirm delete' }).click()
   await expect(page.getByText('Alpha Laptop Renamed')).toHaveCount(0)
+  await expect(page.getByText('Build Runner')).toBeVisible()
+  await expect(page.getByText('2 projects')).toBeVisible()
+  await expect(page.getByText('4 threads')).toBeVisible()
 
   await page.screenshot({
     path: `${SCREENSHOT_DIR}/settings-connectors-desktop.png`,

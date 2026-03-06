@@ -177,3 +177,90 @@ test('connector management supports server binding, rename, token rotation, and 
     assert.equal(alphaServersAfterDeleteBody.data.defaultServerId, '')
   })
 })
+
+test('connector delete response preserves cached stats for remaining connectors', async () => {
+  await withApiServer(async (baseUrl) => {
+    const adminCookie = await createUserAndSession(baseUrl, 'connector-stats-delete-admin', 'admin')
+    const alphaCookie = await createUserAndSession(baseUrl, 'connector-stats-delete-alpha', 'user', adminCookie)
+
+    const statsConnectorResponse = await postJson(
+      `${baseUrl}/codex-api/connectors`,
+      {
+        id: 'build-runner',
+        name: 'Build Runner',
+        hubAddress: 'https://hub.example.test',
+        mockStatus: {
+          connected: true,
+          projectCount: 2,
+          threadCount: 4,
+        },
+      },
+      { Cookie: alphaCookie },
+    )
+    assert.equal(statsConnectorResponse.status, 201)
+
+    const deleteTargetResponse = await postJson(
+      `${baseUrl}/codex-api/connectors`,
+      {
+        id: 'alpha-edge',
+        name: 'Alpha Edge',
+        hubAddress: 'https://hub.example.test',
+      },
+      { Cookie: alphaCookie },
+    )
+    assert.equal(deleteTargetResponse.status, 201)
+
+    const deleteResponse = await deleteRequest(`${baseUrl}/codex-api/connectors/alpha-edge`, {
+      Cookie: alphaCookie,
+    })
+    assert.equal(deleteResponse.status, 200)
+    const deleteBody = await deleteResponse.json()
+    assert.deepEqual(
+      deleteBody.data.connectors.map((connector) => ({
+        id: connector.id,
+        projectCount: connector.projectCount,
+        threadCount: connector.threadCount,
+        statsStale: connector.statsStale,
+      })),
+      [
+        {
+          id: 'build-runner',
+          projectCount: 2,
+          threadCount: 4,
+          statsStale: false,
+        },
+      ],
+    )
+  })
+})
+
+test('connector registration rejects insecure remote hub addresses while allowing loopback http', async () => {
+  await withApiServer(async (baseUrl) => {
+    const adminCookie = await createUserAndSession(baseUrl, 'connector-hub-admin', 'admin')
+    const alphaCookie = await createUserAndSession(baseUrl, 'connector-hub-alpha', 'user', adminCookie)
+
+    const insecureResponse = await postJson(
+      `${baseUrl}/codex-api/connectors`,
+      {
+        id: 'remote-http',
+        name: 'Remote HTTP',
+        hubAddress: 'http://hub.example.test',
+      },
+      { Cookie: alphaCookie },
+    )
+    assert.equal(insecureResponse.status, 400)
+    const insecureBody = await insecureResponse.json()
+    assert.match(insecureBody.error, /HTTPS/i)
+
+    const loopbackResponse = await postJson(
+      `${baseUrl}/codex-api/connectors`,
+      {
+        id: 'local-http',
+        name: 'Local HTTP',
+        hubAddress: 'http://127.0.0.1:4300',
+      },
+      { Cookie: alphaCookie },
+    )
+    assert.equal(loopbackResponse.status, 201)
+  })
+})

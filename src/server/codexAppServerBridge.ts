@@ -22,6 +22,7 @@ import {
   RELAY_E2EE_RPC_METHOD,
   normalizeRelayE2eeEnvelope,
 } from '../types/relayE2ee.js'
+import { normalizeHubAddress } from '../utils/hubAddress.js'
 
 type JsonRpcCall = {
   jsonrpc: '2.0'
@@ -1025,24 +1026,6 @@ function buildUniqueServerId(seed: string, taken: Set<string>): string {
   }
 
   throw new Error('Failed to generate unique server id')
-}
-
-function normalizeHubAddress(value: unknown): string {
-  const rawValue = typeof value === 'string' ? value.trim() : ''
-  if (!rawValue) return ''
-
-  try {
-    const parsed = new URL(rawValue)
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return ''
-    }
-    parsed.hash = ''
-    parsed.search = ''
-    parsed.pathname = parsed.pathname.replace(/\/+$/u, '') || '/'
-    return parsed.toString().replace(/\/$/u, '')
-  } catch {
-    return ''
-  }
 }
 
 function inferHubAddress(req: IncomingMessage): string {
@@ -2551,9 +2534,10 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const name = typeof payload.name === 'string' && payload.name.trim().length > 0
           ? payload.name.trim()
           : connectorId
-        const hubAddress = normalizeHubAddress(payload.hubAddress) || inferHubAddress(req)
+        const explicitHubAddress = typeof payload.hubAddress === 'string' ? payload.hubAddress : ''
+        const hubAddress = normalizeHubAddress(explicitHubAddress) || inferHubAddress(req)
         if (!hubAddress) {
-          setJson(res, 400, { error: 'Valid hubAddress is required' })
+          setJson(res, 400, { error: 'Valid hubAddress is required. Use HTTPS for non-local hubs.' })
           return
         }
         const relayE2ee = payload.e2ee === undefined
@@ -2659,7 +2643,16 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           await writeConnectorRegistryState(registryScope, { connectors: nextConnectors })
           relayHub.revokeAgent(currentConnector.relayAgentId)
           await removeConnectorBoundServer(registryScope, currentConnector.serverId, runtimeRegistry)
-          setJson(res, 200, { ok: true, data: { connectors: nextConnectors.map((connector) => toPublicConnectorRecord(connector, relayHub)) } })
+          setJson(res, 200, {
+            ok: true,
+            data: {
+              connectors: nextConnectors.map((connector) => toPublicConnectorRecord(connector, relayHub, {
+                projectCount: connector.lastKnownProjectCount,
+                threadCount: connector.lastKnownThreadCount,
+                lastStatsAtIso: connector.lastStatsAtIso,
+              })),
+            },
+          })
           return
         }
 

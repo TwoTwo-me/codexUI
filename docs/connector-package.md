@@ -8,30 +8,40 @@ It connects to a central CodexUI hub, pulls relay RPC requests, forwards them in
 
 ### 1. Provision a connector from hub credentials
 
-This command logs into the hub, registers a connector for the current user, and prints the one-time install token.
+This command logs into the hub, registers a connector for the current user, and prints a secure `--token-file` install command.
 
 ```bash
-npx codexui-connector provision \
+read -sr CODEXUI_HUB_PASSWORD && printf '%s' "$CODEXUI_HUB_PASSWORD" | \
+  npx codexui-connector provision \
   --hub https://hub.example.com \
   --username alice \
-  --password 'your-password' \
+  --password-stdin \
   --connector edge-laptop \
   --name 'Alice Edge Laptop'
 ```
 
 Optional flags:
-- `--json` — emit structured JSON for automation
+- `--json` — emit structured JSON for automation (includes the one-time token)
 - `--run` — immediately start the connector after provisioning
 - `--key-id <id>` — attach relay E2EE policy metadata
 - `--passphrase <secret>` — required together with `--run` when E2EE is enabled
+- `--allow-insecure-http` — allow plaintext HTTP for non-loopback lab environments only
 
-### 2. Connect with a one-time token
+### 2. Connect with a one-time token file
+
+Save the one-time token to a file first:
+
+```bash
+install -d -m 700 ~/.codexui-connector
+printf '%s' '<one-time-token>' > ~/.codexui-connector/edge-laptop.token
+chmod 600 ~/.codexui-connector/edge-laptop.token
+```
 
 ```bash
 npx codexui-connector connect \
   --hub https://hub.example.com \
-  --token '<one-time-token>' \
-  --connector edge-laptop
+  --connector edge-laptop \
+  --token-file ~/.codexui-connector/edge-laptop.token
 ```
 
 Optional relay E2EE arguments:
@@ -39,8 +49,8 @@ Optional relay E2EE arguments:
 ```bash
 npx codexui-connector connect \
   --hub https://hub.example.com \
-  --token '<one-time-token>' \
   --connector edge-laptop \
+  --token-file ~/.codexui-connector/edge-laptop.token \
   --key-id relay-key-1 \
   --passphrase '<relay-passphrase>'
 ```
@@ -71,13 +81,13 @@ codex login
 ### From the hub UI
 1. Open **Settings**
 2. Create a connector
-3. Copy the generated install command
-4. Run it on the remote host
+3. Reveal the token once and save it to a secure file on the remote host
+4. Run the generated `--token-file` install command
 
 ### From a terminal only
 1. Provision with hub credentials
-2. Copy the returned token / install command
-3. Start the connector
+2. Save the returned token to a secure file (or use `--json` for automation)
+3. Start the connector with `--token-file`
 
 ## Systemd example
 
@@ -90,7 +100,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/codexui-connector
-ExecStart=/usr/bin/env npx codexui-connector connect --hub https://hub.example.com --token <token> --connector edge-laptop
+ExecStart=/usr/bin/env npx codexui-connector connect --hub https://hub.example.com --connector edge-laptop --token-file /etc/codexui/edge-laptop.token
 Restart=always
 RestartSec=3
 Environment=NODE_ENV=production
@@ -112,13 +122,15 @@ Then run:
 docker run --rm \
   -e CODEX_HOME=/root/.codex \
   -v /path/to/auth.json:/root/.codex/auth.json:ro \
+  -v /path/to/edge-laptop.token:/run/secrets/edge-laptop.token:ro \
   my-codex-connector-image \
-  npx codexui-connector connect --hub https://hub.example.com --token '<token>' --connector edge-laptop
+  npx codexui-connector connect --hub https://hub.example.com --connector edge-laptop --token-file /run/secrets/edge-laptop.token
 ```
 
 ## Security notes
 
 - Relay tokens are one-time install secrets and should be treated like passwords.
+- Non-local hubs must use **HTTPS** unless you explicitly opt into `--allow-insecure-http` for lab use.
 - Rotate tokens from the Settings page when reinstalling or revoking a host.
 - Relay E2EE passphrases are not persisted by the web UI and must be supplied again on the connector host when needed.
 

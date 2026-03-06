@@ -194,8 +194,19 @@
 
       <label class="settings-field">
         <span class="settings-field-label">Token</span>
-        <code class="settings-inline-code">{{ latestInstallArtifact.token }}</code>
-        <textarea class="settings-code-block" readonly :value="latestInstallArtifact.token"></textarea>
+        <div class="settings-inline-actions settings-inline-actions-tight">
+          <button type="button" class="settings-secondary-button" @click="toggleTokenReveal">
+            {{ isTokenRevealed ? 'Hide token' : 'Reveal token' }}
+          </button>
+        </div>
+        <textarea
+          class="settings-code-block"
+          readonly
+          :value="isTokenRevealed ? latestInstallArtifact.token : '••••••••••••••••'"
+        ></textarea>
+        <p class="settings-field-help">
+          Save this token to a secure file on the connector host before running the install command.
+        </p>
       </label>
 
       <label class="settings-field">
@@ -235,6 +246,7 @@ const isRenamingBusy = ref(false)
 const isRotating = ref(false)
 const isDeleting = ref(false)
 const isRenaming = ref(false)
+const isTokenRevealed = ref(false)
 const errorMessage = ref('')
 const renameDraft = ref('')
 const pendingDeleteConnectorId = ref('')
@@ -264,9 +276,10 @@ function normalizeSelection(nextRows: CodexConnectorInfo[]): void {
 
 function buildInstallCommand(connector: CodexConnectorInfo, token: string): string {
   const encodedHub = JSON.stringify(connector.hubAddress)
-  const encodedToken = JSON.stringify(token)
   const encodedConnectorId = JSON.stringify(connector.id)
-  return `npx codexui-connector connect --hub ${encodedHub} --token ${encodedToken} --connector ${encodedConnectorId}`
+  const encodedTokenFile = JSON.stringify(`~/.codexui-connector/${connector.id}.token`)
+  void token
+  return `npx codexui-connector connect --hub ${encodedHub} --connector ${encodedConnectorId} --token-file ${encodedTokenFile}`
 }
 
 function setLatestInstallArtifact(connector: CodexConnectorInfo, token: string): void {
@@ -275,6 +288,11 @@ function setLatestInstallArtifact(connector: CodexConnectorInfo, token: string):
     token,
     command: buildInstallCommand(connector, token),
   }
+  isTokenRevealed.value = false
+}
+
+function toggleTokenReveal(): void {
+  isTokenRevealed.value = !isTokenRevealed.value
 }
 
 function formatCount(value: number | undefined, singular: string, plural = `${singular}s`): string {
@@ -406,10 +424,12 @@ async function confirmDelete(): Promise<void> {
   isDeleting.value = true
   errorMessage.value = ''
   try {
-    const remaining = await deleteConnectorRegistration(connector.id)
-    connectors.value = remaining
-    normalizeSelection(remaining)
+    await deleteConnectorRegistration(connector.id)
+    await refreshConnectors()
     latestInstallArtifact.value = latestInstallArtifact.value?.connectorId === connector.id ? null : latestInstallArtifact.value
+    if (latestInstallArtifact.value === null) {
+      isTokenRevealed.value = false
+    }
     pendingDeleteConnectorId.value = ''
     emit('connectors-changed')
   } catch (error) {
@@ -569,16 +589,16 @@ onMounted(() => {
   @apply flex flex-wrap gap-2;
 }
 
+.settings-inline-actions-tight {
+  @apply justify-start;
+}
+
 .settings-install-card {
   @apply mt-1;
 }
 
 .settings-install-once {
   @apply m-0 text-sm font-medium text-zinc-700;
-}
-
-.settings-inline-code {
-  @apply inline-flex max-w-full overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 px-3 py-2 font-mono text-xs text-zinc-800;
 }
 
 .settings-code-block {
@@ -591,5 +611,9 @@ onMounted(() => {
 
 .settings-empty-state {
   @apply rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-4 py-6 text-sm text-zinc-500;
+}
+
+.settings-field-help {
+  @apply m-0 text-xs leading-5 text-zinc-500;
 }
 </style>

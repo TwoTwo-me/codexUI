@@ -92,13 +92,19 @@ Connector payloads now expose:
 
 1. Open **Settings**
 2. Create a connector
-3. Copy the one-time install token / suggested install command
-4. Install and run `codexui-connector` on the remote host
+3. Reveal the one-time install token and save it to a secure file on the remote host
+4. Run the suggested `--token-file` install command
 5. Return to Settings to confirm:
    - online state
    - project count
    - thread count
 6. Rotate the token when reinstalling or revoking a connector
+
+## Security guardrails
+
+- Non-local hub addresses must use **HTTPS**.
+- The Settings panel now keeps the token masked until the operator explicitly reveals it.
+- Suggested install commands use `--token-file` so the token does not need to appear in shell history.
 
 ## Related docs
 - [`docs/connector-package.md`](./connector-package.md)

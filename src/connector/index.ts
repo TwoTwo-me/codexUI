@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Command } from 'commander'
@@ -13,6 +14,7 @@ import {
   type RelayConnectorSession,
   type RelayConnectorTransport,
 } from './core.js'
+import { normalizeHubAddress } from '../utils/hubAddress.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -27,21 +29,20 @@ async function readConnectorVersion(): Promise<string> {
   }
 }
 
-function normalizeHubAddress(value: string): string {
-  const rawValue = value.trim()
-  if (!rawValue) return ''
-  try {
-    const parsed = new URL(rawValue)
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return ''
-    }
-    parsed.hash = ''
-    parsed.search = ''
-    parsed.pathname = parsed.pathname.replace(/\/+$/u, '') || '/'
-    return parsed.toString().replace(/\/$/u, '')
-  } catch {
-    return ''
+function createHubAddressError(): Error {
+  return new Error('A valid hub address is required. HTTPS is required for non-local hubs unless you pass --allow-insecure-http for local lab testing.')
+}
+
+async function readSecretFromStdin(): Promise<string> {
+  const chunks: Buffer[] = []
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk)
   }
+  return Buffer.concat(chunks).toString('utf8').trim()
+}
+
+async function readSecretFile(path: string): Promise<string> {
+  return (await readFile(path, 'utf8')).trim()
 }
 
 function canRun(command: string, args: string[] = []): boolean {
@@ -91,13 +92,14 @@ function buildAuthorizationHeader(token: string): Record<string, string> {
 }
 
 export function createConnectorInstallCommand(
-  input: { hubAddress: string; connectorId: string; token: string; relayE2eeKeyId?: string },
+  input: { hubAddress: string; connectorId: string; token?: string; relayE2eeKeyId?: string; tokenFilePath?: string },
 ): string {
+  const tokenFilePath = input.tokenFilePath?.trim() || `~/.codexui-connector/${input.connectorId}.token`
   const parts = [
     'npx codexui-connector connect',
     `--hub ${JSON.stringify(input.hubAddress)}`,
-    `--token ${JSON.stringify(input.token)}`,
     `--connector ${JSON.stringify(input.connectorId)}`,
+    `--token-file ${JSON.stringify(tokenFilePath)}`,
   ]
   if (input.relayE2eeKeyId) {
     parts.push(`--key-id ${JSON.stringify(input.relayE2eeKeyId)}`)
@@ -109,10 +111,12 @@ export function createConnectorInstallCommand(
 export class HttpRelayHubTransport implements RelayConnectorTransport {
   private readonly hubAddress: string
 
-  constructor(hubAddress: string) {
-    this.hubAddress = normalizeHubAddress(hubAddress)
+  constructor(hubAddress: string, options?: { allowInsecureHttp?: boolean }) {
+    this.hubAddress = normalizeHubAddress(hubAddress, {
+      allowInsecureHttp: options?.allowInsecureHttp === true,
+    })
     if (!this.hubAddress) {
-      throw new Error('A valid hub address is required')
+      throw createHubAddressError()
     }
   }
 
@@ -207,6 +211,7 @@ export type ProvisionConnectorInput = {
   connectorId: string
   connectorName: string
   relayE2eeKeyId?: string
+  allowInsecureHttp?: boolean
 }
 
 export async function provisionConnectorRegistration(input: ProvisionConnectorInput): Promise<{
@@ -220,9 +225,11 @@ export async function provisionConnectorRegistration(input: ProvisionConnectorIn
   }
   token: string
 }> {
-  const hubAddress = normalizeHubAddress(input.hubAddress)
+  const hubAddress = normalizeHubAddress(input.hubAddress, {
+    allowInsecureHttp: input.allowInsecureHttp === true,
+  })
   if (!hubAddress) {
-    throw new Error('A valid hub address is required')
+    throw createHubAddressError()
   }
 
   const loginResponse = await fetch(`${hubAddress}/auth/login`, {
@@ -317,6 +324,7 @@ async function runConnectorLoop(input: {
   connectorId: string
   relayE2ee?: RelayConnectorE2eeConfig
   verbose: boolean
+  allowInsecureHttp?: boolean
 }): Promise<void> {
   if (!hasCodexAuth()) {
     throw new Error('Codex auth.json is missing on the connector host. Run `codex login` first.')
@@ -325,7 +333,12 @@ async function runConnectorLoop(input: {
   const codexCommand = resolveCodexCommand()
   const logger = createLogger(input.verbose)
   const appServer: RelayConnectorAppServer = new LocalCodexAppServer(codexCommand)
-  const transport = new HttpRelayHubTransport(input.hubAddress)
+  const normalizedHubAddress = normalizeHubAddress(input.hubAddress, {
+    allowInsecureHttp: input.allowInsecureHttp === true,
+  })
+  const transport = new HttpRelayHubTransport(input.hubAddress, {
+    allowInsecureHttp: input.allowInsecureHttp === true,
+  })
   const connector = new CodexRelayConnector({
     token: input.token,
     transport,
@@ -341,8 +354,64 @@ async function runConnectorLoop(input: {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 
-  logger('info', `Starting connector ${input.connectorId} against ${normalizeHubAddress(input.hubAddress)}`)
+  logger('info', `Starting connector ${input.connectorId} against ${normalizedHubAddress}`)
   await connector.run()
+}
+
+async function resolveConnectToken(options: {
+  token?: string
+  tokenFile?: string
+  tokenStdin?: boolean
+}): Promise<string> {
+  const sources = [
+    typeof options.token === 'string' && options.token.trim().length > 0 ? 'token' : '',
+    typeof options.tokenFile === 'string' && options.tokenFile.trim().length > 0 ? 'tokenFile' : '',
+    options.tokenStdin === true ? 'tokenStdin' : '',
+  ].filter((entry) => entry.length > 0)
+
+  if (sources.length !== 1) {
+    throw new Error('Provide exactly one relay token source: --token, --token-file, or --token-stdin.')
+  }
+
+  if (sources[0] === 'token') {
+    return options.token!.trim()
+  }
+  if (sources[0] === 'tokenFile') {
+    const token = await readSecretFile(options.tokenFile!.trim())
+    if (!token) {
+      throw new Error('The relay token file is empty.')
+    }
+    return token
+  }
+
+  const token = await readSecretFromStdin()
+  if (!token) {
+    throw new Error('No relay token was provided on stdin.')
+  }
+  return token
+}
+
+async function resolveProvisionPassword(options: {
+  password?: string
+  passwordStdin?: boolean
+}): Promise<string> {
+  const sources = [
+    typeof options.password === 'string' && options.password.trim().length > 0 ? 'password' : '',
+    options.passwordStdin === true ? 'passwordStdin' : '',
+  ].filter((entry) => entry.length > 0)
+
+  if (sources.length !== 1) {
+    throw new Error('Provide exactly one hub password source: --password or --password-stdin.')
+  }
+  if (sources[0] === 'password') {
+    return options.password!.trim()
+  }
+
+  const password = await readSecretFromStdin()
+  if (!password) {
+    throw new Error('No hub password was provided on stdin.')
+  }
+  return password
 }
 
 async function runCli(argv: string[]): Promise<void> {
@@ -355,19 +424,26 @@ async function runCli(argv: string[]): Promise<void> {
   program.command('connect')
     .description('Connect a remote Codex host to a CodexUI hub using a relay token')
     .requiredOption('--hub <url>', 'CodexUI hub base URL')
-    .requiredOption('--token <token>', 'Connector relay token')
     .requiredOption('--connector <id>', 'Connector identifier (for logging)')
+    .option('--token <token>', 'Connector relay token (least secure)')
+    .option('--token-file <path>', 'Read the connector relay token from a local file')
+    .option('--token-stdin', 'Read the connector relay token from stdin')
     .option('--key-id <keyId>', 'Relay E2EE key id')
     .option('--passphrase <passphrase>', 'Relay E2EE passphrase')
+    .option('--allow-insecure-http', 'Allow plaintext HTTP for non-loopback hubs (lab use only)', false)
     .option('--verbose', 'Enable verbose logging', false)
     .action(async (options: {
       hub: string
-      token: string
       connector: string
+      token?: string
+      tokenFile?: string
+      tokenStdin?: boolean
       keyId?: string
       passphrase?: string
+      allowInsecureHttp?: boolean
       verbose?: boolean
     }) => {
+      const token = await resolveConnectToken(options)
       const relayE2ee = options.keyId && options.passphrase
         ? {
             keyId: options.keyId,
@@ -376,9 +452,10 @@ async function runCli(argv: string[]): Promise<void> {
         : undefined
       await runConnectorLoop({
         hubAddress: options.hub,
-        token: options.token,
+        token,
         connectorId: options.connector,
         ...(relayE2ee ? { relayE2ee } : {}),
+        allowInsecureHttp: options.allowInsecureHttp === true,
         verbose: options.verbose === true,
       })
     })
@@ -387,37 +464,42 @@ async function runCli(argv: string[]): Promise<void> {
     .description('Log in to a hub, register a connector, and print the one-time install token')
     .requiredOption('--hub <url>', 'CodexUI hub base URL')
     .requiredOption('--username <username>', 'Hub username')
-    .requiredOption('--password <password>', 'Hub password')
     .requiredOption('--connector <id>', 'Connector identifier to register')
+    .option('--password <password>', 'Hub password (least secure)')
+    .option('--password-stdin', 'Read the hub password from stdin')
     .option('--name <name>', 'Human-readable connector name')
     .option('--key-id <keyId>', 'Relay E2EE key id')
     .option('--json', 'Print JSON output only', false)
     .option('--run', 'Immediately start the connector after provisioning', false)
     .option('--passphrase <passphrase>', 'Relay E2EE passphrase used when --run is enabled')
+    .option('--allow-insecure-http', 'Allow plaintext HTTP for non-loopback hubs (lab use only)', false)
     .action(async (options: {
       hub: string
       username: string
-      password: string
+      password?: string
+      passwordStdin?: boolean
       connector: string
       name?: string
       keyId?: string
       json?: boolean
       run?: boolean
       passphrase?: string
+      allowInsecureHttp?: boolean
     }) => {
+      const password = await resolveProvisionPassword(options)
       const provisioned = await provisionConnectorRegistration({
         hubAddress: options.hub,
         username: options.username,
-        password: options.password,
+        password,
         connectorId: options.connector,
         connectorName: options.name?.trim() || options.connector,
         ...(options.keyId ? { relayE2eeKeyId: options.keyId } : {}),
+        allowInsecureHttp: options.allowInsecureHttp === true,
       })
 
       const installCommand = createConnectorInstallCommand({
         hubAddress: provisioned.connector.hubAddress,
         connectorId: provisioned.connector.id,
-        token: provisioned.token,
         ...(provisioned.connector.relayE2eeKeyId ? { relayE2eeKeyId: provisioned.connector.relayE2eeKeyId } : {}),
       })
 
@@ -431,9 +513,9 @@ async function runCli(argv: string[]): Promise<void> {
         console.log('Connector registered successfully.\n')
         console.log(`Connector: ${provisioned.connector.name} (${provisioned.connector.id})`)
         console.log(`Hub:       ${provisioned.connector.hubAddress}`)
-        console.log(`Token:     ${provisioned.token}`)
-        console.log('\nSuggested install command:')
+        console.log('\nSave the one-time token to a secure file on the connector host, then run:')
         console.log(installCommand)
+        console.log('\nUse --json if you need to capture the token programmatically, or --run to connect immediately on this host.')
       }
 
       if (options.run) {
@@ -448,6 +530,7 @@ async function runCli(argv: string[]): Promise<void> {
           token: provisioned.token,
           connectorId: provisioned.connector.id,
           ...(relayE2ee ? { relayE2ee } : {}),
+          allowInsecureHttp: options.allowInsecureHttp === true,
           verbose: false,
         })
       }

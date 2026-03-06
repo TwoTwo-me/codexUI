@@ -96,7 +96,8 @@ test('connector package provisions a connector via hub login and returns an inst
     })
     assert.match(installCommand, /codexui-connector connect/)
     assert.match(installCommand, /edge-laptop/)
-    assert.match(installCommand, /install-token-123/)
+    assert.match(installCommand, /--token-file/)
+    assert.doesNotMatch(installCommand, /install-token-123/)
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => {
@@ -108,4 +109,24 @@ test('connector package provisions a connector via hub login and returns an inst
       })
     })
   }
+})
+
+test('connector package rejects insecure non-loopback HTTP hub addresses by default', async () => {
+  const module = await loadConnectorModule()
+
+  await assert.rejects(
+    module.provisionConnectorRegistration({
+      hubAddress: 'http://hub.example.test',
+      username: 'alice',
+      password: 'secret-pass',
+      connectorId: 'edge-laptop',
+      connectorName: 'Edge Laptop',
+    }),
+    /HTTPS is required/i,
+  )
+
+  assert.throws(
+    () => new module.HttpRelayHubTransport('http://hub.example.test'),
+    /HTTPS is required/i,
+  )
 })
