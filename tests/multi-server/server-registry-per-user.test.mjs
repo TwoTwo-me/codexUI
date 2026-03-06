@@ -97,7 +97,6 @@ test('server registry API contract scopes registry state per authenticated user'
     assert.deepEqual(
       alphaRegistry.data.servers.map((server) => ({ id: server.id, name: server.name })),
       [
-        { id: 'default', name: 'Default server' },
         { id: 'workspace-main', name: 'Alpha Workspace' },
       ],
     )
@@ -105,7 +104,6 @@ test('server registry API contract scopes registry state per authenticated user'
     assert.deepEqual(
       betaRegistry.data.servers.map((server) => ({ id: server.id, name: server.name })),
       [
-        { id: 'default', name: 'Default server' },
         { id: 'workspace-main', name: 'Beta Workspace' },
       ],
     )

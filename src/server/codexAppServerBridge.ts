@@ -465,8 +465,6 @@ function getCodexGlobalStatePath(): string {
 
 const SERVER_REGISTRY_STATE_KEY = 'codexui-server-registry'
 const SERVER_REGISTRY_STATE_BY_USER_KEY = 'codexui-server-registry-by-user'
-const DEFAULT_SERVER_ID = 'default'
-const DEFAULT_SERVER_NAME = 'Default server'
 const MAX_SERVER_ID_LENGTH = 64
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const RELAY_AGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
@@ -629,16 +627,6 @@ function normalizeServerRecord(value: unknown, nowIso: string): CodexServerRecor
   }
 }
 
-function createDefaultServerRecord(nowIso: string): CodexServerRecord {
-  return {
-    id: DEFAULT_SERVER_ID,
-    name: DEFAULT_SERVER_NAME,
-    transport: 'local',
-    createdAtIso: nowIso,
-    updatedAtIso: nowIso,
-  }
-}
-
 export function normalizeServerRegistryState(value: unknown, nowIso = new Date().toISOString()): ServerRegistryState {
   const record = asRecord(value)
   const rawServers = Array.isArray(record?.servers) ? record?.servers : []
@@ -651,16 +639,15 @@ export function normalizeServerRegistryState(value: unknown, nowIso = new Date()
   }
 
   if (serversById.size === 0) {
-    const defaultServer = createDefaultServerRecord(nowIso)
     return {
-      defaultServerId: DEFAULT_SERVER_ID,
-      servers: [defaultServer],
+      defaultServerId: '',
+      servers: [],
     }
   }
 
   const candidateDefaultServerId = typeof record?.defaultServerId === 'string' ? record.defaultServerId.trim() : ''
   const hasCandidateDefault = candidateDefaultServerId.length > 0 && serversById.has(candidateDefaultServerId)
-  const defaultServerId = hasCandidateDefault ? candidateDefaultServerId : (serversById.keys().next().value ?? DEFAULT_SERVER_ID)
+  const defaultServerId = hasCandidateDefault ? candidateDefaultServerId : (serversById.keys().next().value ?? '')
 
   return {
     defaultServerId,
@@ -2112,7 +2099,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         }
 
         const providedServerId = typeof payload.id === 'string' ? payload.id.trim() : ''
-        if (providedServerId.length > 0 && !isValidServerId(providedServerId)) {
+        if (providedServerId.length === 0) {
+          setJson(res, 400, { error: 'Explicit server id is required' })
+          return
+        }
+        if (!isValidServerId(providedServerId)) {
           setJson(res, 400, { error: `Invalid server id "${providedServerId}"` })
           return
         }
@@ -2126,17 +2117,14 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         }
         const state = await readServerRegistryState(registryScope, { persistNormalized: true })
         const existingIds = new Set(state.servers.map((server) => server.id))
-        if (providedServerId.length > 0 && existingIds.has(providedServerId)) {
+        if (existingIds.has(providedServerId)) {
           setJson(res, 409, { error: `Server "${providedServerId}" already exists` })
           return
         }
 
-        const nextServerId = providedServerId.length > 0
-          ? providedServerId
-          : buildUniqueServerId(providedName || 'server', existingIds)
         const nowIso = new Date().toISOString()
         const nextServer: CodexServerRecord = {
-          id: nextServerId,
+          id: providedServerId,
           name: providedName.length > 0 ? providedName : `Server ${String(state.servers.length + 1)}`,
           transport: transportConfig.value.transport,
           ...(transportConfig.value.relay ? { relay: transportConfig.value.relay } : {}),
@@ -2144,7 +2132,9 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           updatedAtIso: nowIso,
         }
         const nextState: ServerRegistryState = {
-          defaultServerId: makeDefault ? nextServerId : state.defaultServerId,
+          defaultServerId: makeDefault || state.defaultServerId.trim().length === 0
+            ? providedServerId
+            : state.defaultServerId,
           servers: [...state.servers, nextServer],
         }
         await writeServerRegistryState(registryScope, nextState)
@@ -2246,19 +2236,16 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
           const remainingServers = state.servers.filter((item) => item.id !== serverResourceId)
           let nextDefaultServerId = state.defaultServerId
-          let nextServers = remainingServers
 
           if (remainingServers.length === 0) {
-            const fallbackServer = createDefaultServerRecord(new Date().toISOString())
-            nextServers = [fallbackServer]
-            nextDefaultServerId = fallbackServer.id
+            nextDefaultServerId = ''
           } else if (state.defaultServerId === serverResourceId) {
             nextDefaultServerId = remainingServers[0].id
           }
 
           const nextState: ServerRegistryState = {
             defaultServerId: nextDefaultServerId,
-            servers: nextServers,
+            servers: remainingServers,
           }
           await writeServerRegistryState(registryScope, nextState)
           runtimeRegistry.disposeServer(registryScope.cacheKey, serverResourceId)

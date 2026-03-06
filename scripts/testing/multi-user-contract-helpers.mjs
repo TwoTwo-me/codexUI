@@ -7,8 +7,6 @@ const RELAY_AGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const LEGACY_RELAY_AGENT_ID_PATTERN = /^agent:([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/u
 const RELAY_E2EE_KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const RELAY_E2EE_ALGORITHM = 'aes-256-gcm'
-const DEFAULT_SERVER_ID = 'default'
-const DEFAULT_SERVER_NAME = 'Default server'
 const DEFAULT_RELAY_PROTOCOL = 'relay-http-v1'
 const DEFAULT_RELAY_TIMEOUT_MS = 60_000
 
@@ -74,16 +72,6 @@ function jsonResponse(status, payload, headers = {}) {
       ...headers,
     },
     body: JSON.stringify(payload),
-  }
-}
-
-function defaultServerRecord(nowIso) {
-  return {
-    id: DEFAULT_SERVER_ID,
-    name: DEFAULT_SERVER_NAME,
-    transport: 'local',
-    createdAtIso: nowIso,
-    updatedAtIso: nowIso,
   }
 }
 
@@ -173,31 +161,6 @@ function normalizeRelayConfig(value) {
   }
 }
 
-function buildFallbackServerId(seed, takenIds) {
-  const normalizedSeed = (typeof seed === 'string' ? seed : '')
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9._-]+/gu, '-')
-    .replace(/^-+/u, '')
-    .replace(/-+$/u, '')
-  const baseSeed = normalizedSeed.length > 0 ? normalizedSeed : 'server'
-
-  if (SERVER_ID_PATTERN.test(baseSeed) && !takenIds.has(baseSeed)) {
-    return baseSeed
-  }
-
-  let suffix = 2
-  while (suffix < 100_000) {
-    const candidate = `${baseSeed}-${String(suffix)}`
-    if (SERVER_ID_PATTERN.test(candidate) && !takenIds.has(candidate)) {
-      return candidate
-    }
-    suffix += 1
-  }
-
-  throw new Error('Could not generate a unique server id')
-}
-
 function normalizeSignupRole(rawRole) {
   if (rawRole === 'admin') return 'admin'
   return 'user'
@@ -244,10 +207,9 @@ export function createMultiUserContractApi() {
       return existing
     }
 
-    const nowIso = new Date().toISOString()
     const created = {
-      defaultServerId: DEFAULT_SERVER_ID,
-      servers: [defaultServerRecord(nowIso)],
+      defaultServerId: '',
+      servers: [],
     }
     registryByUserId.set(userId, created)
     return created
@@ -372,6 +334,8 @@ export function createMultiUserContractApi() {
         return jsonResponse(405, { error: 'Method not allowed' })
       }
 
+      const serverMatch = url.pathname.match(/^\/codex-api\/servers\/([^/]+)$/u)
+
       if (url.pathname === '/codex-api/servers') {
         const user = resolveSessionUser(request?.headers)
         if (!user) {
@@ -393,14 +357,16 @@ export function createMultiUserContractApi() {
           const existingIds = new Set(state.servers.map((server) => server.id))
 
           const providedServerId = typeof payload.id === 'string' ? payload.id.trim() : ''
-          if (providedServerId && !SERVER_ID_PATTERN.test(providedServerId)) {
+          if (!providedServerId) {
+            return jsonResponse(400, { error: 'Explicit server id is required' })
+          }
+          if (!SERVER_ID_PATTERN.test(providedServerId)) {
             return jsonResponse(400, { error: `Invalid server id "${providedServerId}"` })
           }
-          if (providedServerId && existingIds.has(providedServerId)) {
+          if (existingIds.has(providedServerId)) {
             return jsonResponse(409, { error: `Server "${providedServerId}" already exists` })
           }
 
-          const nextServerId = providedServerId || buildFallbackServerId(payload.name, existingIds)
           const nowIso = new Date().toISOString()
           const transport = normalizeServerTransport(payload.transport)
           const relay = normalizeRelayConfig(payload.relay)
@@ -408,7 +374,7 @@ export function createMultiUserContractApi() {
             return jsonResponse(400, { error: 'Relay transport requires relay.agentId' })
           }
           const nextServer = {
-            id: nextServerId,
+            id: providedServerId,
             name: typeof payload.name === 'string' && payload.name.trim().length > 0
               ? payload.name.trim()
               : `Server ${String(state.servers.length + 1)}`,
@@ -420,7 +386,7 @@ export function createMultiUserContractApi() {
 
           const makeDefault = payload.isDefault === true || payload.makeDefault === true || payload.default === true
           const nextState = {
-            defaultServerId: makeDefault ? nextServer.id : state.defaultServerId,
+            defaultServerId: makeDefault || state.defaultServerId.trim().length === 0 ? nextServer.id : state.defaultServerId,
             servers: [...state.servers, nextServer],
           }
           registryByUserId.set(user.id, nextState)
@@ -431,6 +397,40 @@ export function createMultiUserContractApi() {
               registry: cloneRegistry(nextState),
             },
           })
+        }
+
+        return jsonResponse(405, { error: 'Method not allowed' })
+      }
+
+      if (serverMatch) {
+        const user = resolveSessionUser(request?.headers)
+        if (!user) {
+          return jsonResponse(401, { error: 'Unauthorized' })
+        }
+
+        const serverId = serverMatch[1]
+        if (!SERVER_ID_PATTERN.test(serverId)) {
+          return jsonResponse(400, { error: `Invalid server id "${serverId}"` })
+        }
+
+        const state = getOrCreateRegistry(user.id)
+        const server = state.servers.find((entry) => entry.id === serverId)
+        if (!server) {
+          return jsonResponse(404, { error: `Server "${serverId}" not found` })
+        }
+
+        if (method === 'DELETE') {
+          const remainingServers = state.servers.filter((entry) => entry.id !== serverId)
+          const nextState = {
+            defaultServerId: remainingServers.length === 0
+              ? ''
+              : state.defaultServerId === serverId
+                ? remainingServers[0].id
+                : state.defaultServerId,
+            servers: remainingServers,
+          }
+          registryByUserId.set(user.id, nextState)
+          return jsonResponse(200, { ok: true, data: cloneRegistry(nextState) })
         }
 
         return jsonResponse(405, { error: 'Method not allowed' })
