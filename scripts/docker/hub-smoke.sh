@@ -71,6 +71,7 @@ async function main() {
     throw new Error(`Unexpected session payload: ${JSON.stringify(payload)}`)
   }
   console.log(`[hub-smoke] Authenticated as ${payload.user.username} via ${baseUrl}`)
+  process.exit(0)
 }
 
 main().catch((error) => {
