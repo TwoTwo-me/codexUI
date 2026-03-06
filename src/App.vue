@@ -137,10 +137,9 @@
                   tone="hero"
                   @update:model-value="onSelectServer"
                 />
-                <p class="new-thread-title">New thread</p>
               </div>
               <div class="new-thread-empty">
-                <p class="new-thread-hero">Let's build</p>
+                <p class="new-thread-hero">New thread</p>
               </div>
 
               <ThreadComposer :active-thread-id="composerThreadContextId"
@@ -768,12 +767,8 @@ async function onLogout(): Promise<void> {
   @apply flex-1 min-h-0 flex flex-col items-center justify-center gap-0.5 px-3 sm:px-6;
 }
 
-.new-thread-title {
-  @apply m-0 text-sm sm:text-base font-semibold text-zinc-950;
-}
-
 .new-thread-hero {
-  @apply m-0 text-2xl sm:text-[2.5rem] font-normal leading-[1.05] text-zinc-900;
+  @apply m-0 text-2xl sm:text-[2.5rem] font-semibold leading-[1.05] text-zinc-900;
 }
 
 .admin-guard {

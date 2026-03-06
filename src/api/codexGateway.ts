@@ -544,6 +544,51 @@ export async function getFsDirectoryList(path?: string): Promise<FsDirectoryList
   return normalizeFsDirectoryListing(envelope.data)
 }
 
+export type ComposerFileSuggestion = {
+  path: string
+}
+
+function normalizeComposerFileSuggestions(payload: unknown): ComposerFileSuggestion[] {
+  const rows = Array.isArray(payload) ? payload : []
+  const suggestions: ComposerFileSuggestion[] = []
+  for (const row of rows) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+    const record = row as Record<string, unknown>
+    const path = typeof record.path === 'string' ? record.path.trim() : ''
+    if (!path) continue
+    suggestions.push({ path })
+  }
+  return suggestions
+}
+
+export async function searchComposerFiles(cwd: string, query = '', limit = 20): Promise<ComposerFileSuggestion[]> {
+  const normalizedCwd = cwd.trim()
+  if (!normalizedCwd) return []
+
+  const response = await fetch('/codex-api/composer-file-search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      cwd: normalizedCwd,
+      query,
+      limit,
+    }),
+  })
+
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    const message = getErrorMessageFromPayload(payload, 'Failed to search files')
+    throw new Error(message)
+  }
+
+  const envelope =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : {}
+
+  return normalizeComposerFileSuggestions(envelope.data)
+}
+
 function getErrorMessageFromPayload(payload: unknown, fallback: string): string {
   const record = payload && typeof payload === 'object' && !Array.isArray(payload)
     ? (payload as Record<string, unknown>)

@@ -68,7 +68,7 @@
     </section>
 
     <SidebarMenuRow as="header" class="thread-tree-header-row">
-      <span class="thread-tree-header">Threads</span>
+      <span class="thread-tree-header">Projects</span>
       <template #right>
         <div ref="organizeMenuWrapRef" class="organize-menu-wrap">
           <button
