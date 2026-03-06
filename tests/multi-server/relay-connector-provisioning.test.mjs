@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { execFileSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -9,10 +8,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoDir = resolve(__dirname, '../..')
 
 async function loadConnectorModule() {
-  execFileSync('npm', ['run', 'build:cli'], {
-    cwd: repoDir,
-    stdio: 'pipe',
-  })
   const moduleUrl = pathToFileURL(resolve(repoDir, 'dist-cli/connector.js')).href
   return await import(`${moduleUrl}?t=${Date.now()}`)
 }
