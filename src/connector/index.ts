@@ -41,7 +41,19 @@ async function readSecretFromStdin(): Promise<string> {
 }
 
 async function readSecretFile(path: string): Promise<string> {
-  return (await readFile(path, 'utf8')).trim()
+  return (await readFile(expandUserPath(path), 'utf8')).trim()
+}
+
+function expandUserPath(path: string): string {
+  const trimmed = path.trim()
+  if (!trimmed) return trimmed
+  if (trimmed === '~') {
+    return homedir()
+  }
+  if (trimmed.startsWith('~/')) {
+    return join(homedir(), trimmed.slice(2))
+  }
+  return trimmed
 }
 
 function canRun(command: string, args: string[] = []): boolean {
@@ -93,7 +105,7 @@ function buildAuthorizationHeader(token: string): Record<string, string> {
 export function createConnectorInstallCommand(
   input: { hubAddress: string; connectorId: string; relayE2eeKeyId?: string; tokenFilePath?: string },
 ): string {
-  const tokenFilePath = input.tokenFilePath?.trim() || `~/.codexui-connector/${input.connectorId}.token`
+  const tokenFilePath = input.tokenFilePath?.trim() || `$HOME/.codexui-connector/${input.connectorId}.token`
   const parts = [
     'npx codexui-connector install',
     `--hub ${JSON.stringify(input.hubAddress)}`,
@@ -314,7 +326,7 @@ export async function provisionConnectorRegistration(input: ProvisionConnectorIn
 }
 
 export async function writeConnectorTokenFile(path: string, token: string): Promise<void> {
-  const normalizedPath = path.trim()
+  const normalizedPath = expandUserPath(path)
   if (!normalizedPath) {
     throw new Error('A token file path is required.')
   }
@@ -449,7 +461,7 @@ export async function installConnectorFromBootstrap(input: {
 
   return {
     ...exchanged,
-    ...(input.tokenFile?.trim() ? { tokenFilePath: input.tokenFile.trim() } : {}),
+    ...(input.tokenFile?.trim() ? { tokenFilePath: expandUserPath(input.tokenFile.trim()) } : {}),
   }
 }
 
@@ -550,6 +562,24 @@ async function resolveInstallToken(options: {
   return token
 }
 
+function validateInstallPersistence(options: {
+  token?: string
+  tokenFile?: string
+  tokenStdin?: boolean
+  run?: boolean
+}): void {
+  const hasPersistentFile = typeof options.tokenFile === 'string' && options.tokenFile.trim().length > 0
+  if (hasPersistentFile || options.run === true) {
+    return
+  }
+
+  const ephemeralSecret = (typeof options.token === 'string' && options.token.trim().length > 0)
+    || options.tokenStdin === true
+  if (ephemeralSecret) {
+    throw new Error('Use --token-file (recommended) or pass --run so the durable credential is not lost after bootstrap exchange.')
+  }
+}
+
 async function resolveProvisionPassword(options: {
   password?: string
   passwordStdin?: boolean
@@ -643,6 +673,7 @@ async function runCli(argv: string[]): Promise<void> {
       allowInsecureHttp?: boolean
       verbose?: boolean
     }) => {
+      validateInstallPersistence(options)
       const installed = await installConnectorFromBootstrap({
         hubAddress: options.hub,
         connectorId: options.connector,
@@ -652,20 +683,21 @@ async function runCli(argv: string[]): Promise<void> {
         allowInsecureHttp: options.allowInsecureHttp === true,
       })
 
-      const connectCommand = [
-        'npx codexui-connector connect',
-        `--hub ${JSON.stringify(options.hub)}`,
-        `--connector ${JSON.stringify(options.connector)}`,
-        ...(options.tokenFile?.trim() ? [`--token-file ${JSON.stringify(options.tokenFile.trim())}`] : ['--token-stdin']),
-      ].join(' ')
-
       console.log('Connector bootstrap exchange complete.\n')
       console.log(`Connector: ${installed.connector.name} (${installed.connector.id})`)
       if (installed.tokenFilePath) {
         console.log(`Credential file updated: ${installed.tokenFilePath}`)
+        const connectCommand = [
+          'npx codexui-connector connect',
+          `--hub ${JSON.stringify(options.hub)}`,
+          `--connector ${JSON.stringify(options.connector)}`,
+          `--token-file ${JSON.stringify(options.tokenFile?.trim() || `$HOME/.codexui-connector/${options.connector}.token`)}`,
+        ].join(' ')
+        console.log('\nStart or restart the connector with:')
+        console.log(connectCommand)
+      } else {
+        console.log('\nNo token file was written because the connector is running immediately in this process.')
       }
-      console.log('\nStart or restart the connector with:')
-      console.log(connectCommand)
 
       if (options.run) {
         const relayE2ee = options.keyId && options.passphrase

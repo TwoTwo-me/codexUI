@@ -403,3 +403,41 @@ test('connector bootstrap exchange rejects expired bootstrap tokens and reports 
     assert.equal(exchangeResponse.status, 410)
   })
 })
+
+test('connector bootstrap exchange rate limits repeated unauthenticated guesses', async () => {
+  await withApiServer(async (baseUrl) => {
+    const adminCookie = await createUserAndSession(baseUrl, 'connector-guess-admin', 'admin')
+    const alphaCookie = await createUserAndSession(baseUrl, 'connector-guess-alpha', 'user', adminCookie)
+
+    const createResponse = await postJson(
+      `${baseUrl}/codex-api/connectors`,
+      {
+        id: 'guess-edge',
+        name: 'Guess Edge',
+        hubAddress: 'https://hub.example.test',
+      },
+      { Cookie: alphaCookie },
+    )
+    assert.equal(createResponse.status, 201)
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const response = await postJson(
+        `${baseUrl}/codex-api/connectors/guess-edge/bootstrap-exchange`,
+        {},
+        {
+          Authorization: `Bearer invalid-${String(attempt)}`,
+        },
+      )
+      assert.equal(response.status, 401)
+    }
+
+    const limitedResponse = await postJson(
+      `${baseUrl}/codex-api/connectors/guess-edge/bootstrap-exchange`,
+      {},
+      {
+        Authorization: 'Bearer invalid-final',
+      },
+    )
+    assert.equal(limitedResponse.status, 429)
+  })
+})

@@ -11,6 +11,7 @@ const RELAY_E2EE_ALGORITHM = 'aes-256-gcm'
 const DEFAULT_RELAY_PROTOCOL = 'relay-http-v1'
 const DEFAULT_RELAY_TIMEOUT_MS = 60_000
 const CONNECTOR_BOOTSTRAP_TTL_MS = 15 * 60_000
+const BOOTSTRAP_EXCHANGE_MAX_GUESSES = 4
 
 function isLoopbackHostname(hostname) {
   const normalized = String(hostname ?? '').trim().toLowerCase().replace(/^\[/u, '').replace(/\]$/u, '')
@@ -129,8 +130,14 @@ function clampTimeoutMs(value) {
   return normalized
 }
 
-function createConnectorSecretToken() {
-  return `connector-token-${randomBytes(12).toString('hex')}`
+function createConnectorBootstrapSecret() {
+  const bootstrapId = `boot-${randomBytes(6).toString('hex')}`
+  const token = `${bootstrapId}.${randomBytes(16).toString('hex')}`
+  return {
+    bootstrapId,
+    token,
+    tokenHash: hashSecret(token),
+  }
 }
 
 function getBootstrapExpiryIso(issuedAtIso, ttlMs = CONNECTOR_BOOTSTRAP_TTL_MS) {
@@ -162,6 +169,22 @@ function deriveInstallState(connector) {
   return connector.bootstrapConsumedAtIso || connector.credentialIssuedAtIso
     ? 'reinstall_required'
     : 'pending_install'
+}
+
+function parseBootstrapToken(token) {
+  const normalizedToken = typeof token === 'string' ? token.trim() : ''
+  if (!normalizedToken) return null
+  const separatorIndex = normalizedToken.indexOf('.')
+  if (separatorIndex <= 0 || separatorIndex === normalizedToken.length - 1) {
+    return {
+      bootstrapId: '',
+      tokenHash: hashSecret(normalizedToken),
+    }
+  }
+  return {
+    bootstrapId: normalizedToken.slice(0, separatorIndex),
+    tokenHash: hashSecret(normalizedToken),
+  }
 }
 
 function serializeConnector(connector, options = {}) {
@@ -276,6 +299,7 @@ export function createMultiUserContractApi() {
   const sessionsByToken = new Map()
   const registryByUserId = new Map()
   const connectorsByUserId = new Map()
+  const bootstrapGuessCountByKey = new Map()
 
   function resolveSessionUser(headers) {
     const cookieHeader = getHeaderValue(headers, 'cookie')
@@ -318,26 +342,51 @@ export function createMultiUserContractApi() {
   }
 
   function findConnectorByBootstrapToken(connectorId, token) {
-    const normalizedToken = typeof token === 'string' ? token.trim() : ''
-    if (!normalizedToken) {
+    const parsedToken = parseBootstrapToken(token)
+    if (!parsedToken) {
       return null
     }
-    const tokenHash = hashSecret(normalizedToken)
 
     for (const [userId, connectors] of connectorsByUserId.entries()) {
       const index = connectors.findIndex((connector) => {
-        return connector.id === connectorId && connector.bootstrapTokenHash === tokenHash
+        if (connector.id !== connectorId) return false
+        if (parsedToken.bootstrapId && connector.bootstrapId !== parsedToken.bootstrapId) return false
+        return connector.bootstrapTokenHash === parsedToken.tokenHash
       })
-      if (index === -1) continue
+      if (index >= 0) {
+        return {
+          userId,
+          connectors,
+          connector: connectors[index],
+          index,
+        }
+      }
+
+      const consumedIndex = connectors.findIndex((connector) => {
+        if (connector.id !== connectorId) return false
+        return parsedToken.bootstrapId.length > 0
+          && connector.bootstrapId === parsedToken.bootstrapId
+          && !!connector.bootstrapConsumedAtIso
+      })
+      if (consumedIndex === -1) continue
       return {
         userId,
         connectors,
-        connector: connectors[index],
-        index,
+        connector: connectors[consumedIndex],
+        index: consumedIndex,
+        matchedConsumedBootstrap: true,
       }
     }
 
     return null
+  }
+
+  function consumeBootstrapGuessLimit(request, connectorId) {
+    const remoteAddress = request?.socket?.remoteAddress ?? 'local'
+    const key = `${remoteAddress}:${connectorId}`
+    const next = (bootstrapGuessCountByKey.get(key) ?? 0) + 1
+    bootstrapGuessCountByKey.set(key, next)
+    return next > BOOTSTRAP_EXCHANGE_MAX_GUESSES
   }
 
   function findConnectorByCredentialToken(token) {
@@ -658,9 +707,9 @@ export function createMultiUserContractApi() {
           const bootstrapTtlMs = Number.isFinite(Number(payload.bootstrapTtlMs))
             ? Math.trunc(Number(payload.bootstrapTtlMs))
             : CONNECTOR_BOOTSTRAP_TTL_MS
-          const bootstrapToken = createConnectorSecretToken()
+          const bootstrapSecret = createConnectorBootstrapSecret()
           const simulateInstalled = payload.mockStatus?.connected === true
-          const installedCredentialToken = simulateInstalled ? createConnectorSecretToken() : ''
+          const installedCredentialToken = simulateInstalled ? createConnectorBootstrapSecret().token : ''
           const connector = {
             id: connectorId,
             serverId: connectorId,
@@ -676,7 +725,8 @@ export function createMultiUserContractApi() {
                   bootstrapConsumedAtIso: nowIso,
                 }
               : {
-                  bootstrapTokenHash: hashSecret(bootstrapToken),
+                  bootstrapId: bootstrapSecret.bootstrapId,
+                  bootstrapTokenHash: bootstrapSecret.tokenHash,
                   bootstrapIssuedAtIso: nowIso,
                   bootstrapExpiresAtIso: getBootstrapExpiryIso(nowIso, bootstrapTtlMs),
                 }),
@@ -696,7 +746,7 @@ export function createMultiUserContractApi() {
           return jsonResponse(201, {
             data: {
               connector: serializeConnector(connector),
-              bootstrapToken,
+              bootstrapToken: bootstrapSecret.token,
             },
           })
         }
@@ -717,25 +767,30 @@ export function createMultiUserContractApi() {
           if (!scheme || scheme.toLowerCase() !== 'bearer' || !token) {
             return jsonResponse(401, { error: 'Invalid bootstrap token' })
           }
+          if (consumeBootstrapGuessLimit(request, connectorId)) {
+            return jsonResponse(429, { error: 'Too many bootstrap exchange attempts. Try again later.' })
+          }
 
           const bootstrapLookup = findConnectorByBootstrapToken(connectorId, token)
           if (!bootstrapLookup) {
             return jsonResponse(401, { error: 'Invalid bootstrap token' })
           }
-          if (bootstrapLookup.connector.bootstrapConsumedAtIso) {
+          if (bootstrapLookup.matchedConsumedBootstrap || bootstrapLookup.connector.bootstrapConsumedAtIso) {
             return jsonResponse(409, { error: 'Bootstrap token already consumed' })
           }
           if (isBootstrapExpired(bootstrapLookup.connector)) {
             return jsonResponse(410, { error: 'Bootstrap token expired' })
           }
 
-          const credentialToken = createConnectorSecretToken()
+          const credentialToken = createConnectorBootstrapSecret().token
           const nowIso = new Date().toISOString()
           const next = {
             ...bootstrapLookup.connector,
             credentialHash: hashSecret(credentialToken),
             credentialIssuedAtIso: nowIso,
             bootstrapConsumedAtIso: nowIso,
+            bootstrapTokenHash: undefined,
+            bootstrapExpiresAtIso: undefined,
             connected: false,
             updatedAtIso: nowIso,
           }
@@ -782,14 +837,15 @@ export function createMultiUserContractApi() {
         }
 
         if (method === 'POST' && action === 'rotate-token') {
-          const bootstrapToken = createConnectorSecretToken()
+          const bootstrapSecret = createConnectorBootstrapSecret()
           const nowIso = new Date().toISOString()
           const next = {
             ...current,
             credentialHash: undefined,
             connected: false,
             lastSeenAtIso: undefined,
-            bootstrapTokenHash: hashSecret(bootstrapToken),
+            bootstrapId: bootstrapSecret.bootstrapId,
+            bootstrapTokenHash: bootstrapSecret.tokenHash,
             bootstrapIssuedAtIso: nowIso,
             bootstrapExpiresAtIso: getBootstrapExpiryIso(nowIso),
             bootstrapConsumedAtIso: undefined,
@@ -799,7 +855,7 @@ export function createMultiUserContractApi() {
           return jsonResponse(200, {
             data: {
               connector: serializeConnector(next),
-              bootstrapToken,
+              bootstrapToken: bootstrapSecret.token,
             },
           })
         }

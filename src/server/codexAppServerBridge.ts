@@ -104,6 +104,7 @@ type CodexConnectorRecord = {
   hubAddress: string
   relayAgentId: string
   relayE2eeKeyId?: string
+  bootstrapId?: string
   credentialHash?: string
   credentialIssuedAtIso?: string
   bootstrapTokenHash?: string
@@ -531,6 +532,11 @@ const RELAY_AGENT_RATE_LIMIT_BLOCK_MS = 60_000
 const RELAY_AGENT_RATE_LIMIT_MAX_PER_IP = 4_000
 const RELAY_AGENT_RATE_LIMIT_MAX_PER_CLIENT_KEY = 480
 const RELAY_AGENT_RATE_LIMIT_MAX_ENTRIES = 4096
+const BOOTSTRAP_EXCHANGE_RATE_LIMIT_WINDOW_MS = 60_000
+const BOOTSTRAP_EXCHANGE_RATE_LIMIT_BLOCK_MS = 60_000
+const BOOTSTRAP_EXCHANGE_RATE_LIMIT_MAX_PER_IP = 240
+const BOOTSTRAP_EXCHANGE_RATE_LIMIT_MAX_PER_CLIENT_KEY = 16
+const BOOTSTRAP_EXCHANGE_RATE_LIMIT_MAX_ENTRIES = 4096
 const CONNECTOR_BOOTSTRAP_TTL_MS = 15 * 60_000
 const cachedServerRegistryStateByScope = new Map<string, ServerRegistryState>()
 const cachedConnectorRegistryStateByScope = new Map<string, ConnectorRegistryState>()
@@ -761,6 +767,9 @@ function normalizeConnectorRecord(value: unknown, nowIso: string): CodexConnecto
   const relayE2eeKeyId = typeof record.relayE2eeKeyId === 'string' && record.relayE2eeKeyId.trim().length > 0
     ? record.relayE2eeKeyId.trim()
     : undefined
+  const bootstrapId = typeof record.bootstrapId === 'string' && record.bootstrapId.trim().length > 0
+    ? record.bootstrapId.trim()
+    : undefined
   if (relayE2eeKeyId && !RELAY_E2EE_KEY_ID_PATTERN.test(relayE2eeKeyId)) {
     return null
   }
@@ -799,6 +808,7 @@ function normalizeConnectorRecord(value: unknown, nowIso: string): CodexConnecto
     hubAddress,
     relayAgentId,
     ...(relayE2eeKeyId ? { relayE2eeKeyId } : {}),
+    ...(bootstrapId ? { bootstrapId } : {}),
     ...(resolvedCredentialHash ? { credentialHash: resolvedCredentialHash } : {}),
     ...(credentialIssuedAtIso ? { credentialIssuedAtIso } : {}),
     ...(bootstrapTokenHash ? { bootstrapTokenHash } : {}),
@@ -1026,8 +1036,15 @@ function listPersistedConnectorRecords(payload: Record<string, unknown>): CodexC
   return Array.from(recordsById.values())
 }
 
-function createConnectorSecretToken(): string {
-  return randomBytes(32).toString('base64url')
+function createConnectorBootstrapSecret(): { bootstrapId: string; token: string; tokenHash: string } {
+  const bootstrapId = `boot-${randomBytes(6).toString('hex')}`
+  const secret = randomBytes(32).toString('base64url')
+  const token = `${bootstrapId}.${secret}`
+  return {
+    bootstrapId,
+    token,
+    tokenHash: hashConnectorSecret(token),
+  }
 }
 
 function hashConnectorSecret(token: string): string {
@@ -1080,21 +1097,40 @@ type ConnectorRegistryLookup = {
   state: ConnectorRegistryState
   connector: CodexConnectorRecord
   index: number
+  matchedConsumedBootstrap?: boolean
+}
+
+function parseBootstrapToken(token: string): { bootstrapId: string; tokenHash: string } | null {
+  const normalizedToken = token.trim()
+  if (!normalizedToken) return null
+  const separatorIndex = normalizedToken.indexOf('.')
+  if (separatorIndex <= 0 || separatorIndex === normalizedToken.length - 1) {
+    return {
+      bootstrapId: '',
+      tokenHash: hashConnectorSecret(normalizedToken),
+    }
+  }
+
+  return {
+    bootstrapId: normalizedToken.slice(0, separatorIndex),
+    tokenHash: hashConnectorSecret(normalizedToken),
+  }
 }
 
 async function findConnectorByBootstrapToken(
   connectorId: string,
   token: string,
 ): Promise<ConnectorRegistryLookup | null> {
-  const normalizedToken = token.trim()
-  if (!normalizedToken) return null
-  const hashedToken = hashConnectorSecret(normalizedToken)
+  const parsedToken = parseBootstrapToken(token)
+  if (!parsedToken) return null
   const payload = await readCodexGlobalStatePayload()
   const nowIso = new Date().toISOString()
 
   const globalRegistry = normalizeConnectorRegistryState(payload[CONNECTOR_REGISTRY_STATE_KEY], nowIso)
   const globalIndex = globalRegistry.connectors.findIndex((connector) => {
-    return connector.id === connectorId && connector.bootstrapTokenHash === hashedToken
+    if (connector.id !== connectorId) return false
+    if (parsedToken.bootstrapId && connector.bootstrapId !== parsedToken.bootstrapId) return false
+    return connector.bootstrapTokenHash === parsedToken.tokenHash
   })
   if (globalIndex >= 0) {
     return {
@@ -1104,19 +1140,52 @@ async function findConnectorByBootstrapToken(
       index: globalIndex,
     }
   }
+  const consumedGlobalIndex = globalRegistry.connectors.findIndex((connector) => {
+    if (connector.id !== connectorId) return false
+    return parsedToken.bootstrapId.length > 0
+      && connector.bootstrapId === parsedToken.bootstrapId
+      && !!connector.bootstrapConsumedAtIso
+  })
+  if (consumedGlobalIndex >= 0) {
+    return {
+      scope: { cacheKey: 'global', userId: null },
+      state: globalRegistry,
+      connector: globalRegistry.connectors[consumedGlobalIndex],
+      index: consumedGlobalIndex,
+      matchedConsumedBootstrap: true,
+    }
+  }
 
   const perUserPayload = asRecord(payload[CONNECTOR_REGISTRY_STATE_BY_USER_KEY]) ?? {}
   for (const [userId, rawRegistry] of Object.entries(perUserPayload)) {
     const registry = normalizeConnectorRegistryState(rawRegistry, nowIso)
     const connectorIndex = registry.connectors.findIndex((connector) => {
-      return connector.id === connectorId && connector.bootstrapTokenHash === hashedToken
+      if (connector.id !== connectorId) return false
+      if (parsedToken.bootstrapId && connector.bootstrapId !== parsedToken.bootstrapId) return false
+      return connector.bootstrapTokenHash === parsedToken.tokenHash
     })
-    if (connectorIndex === -1) continue
+    if (connectorIndex >= 0) {
+      return {
+        scope: { cacheKey: `user:${userId}`, userId },
+        state: registry,
+        connector: registry.connectors[connectorIndex],
+        index: connectorIndex,
+      }
+    }
+
+    const consumedIndex = registry.connectors.findIndex((connector) => {
+      if (connector.id !== connectorId) return false
+      return parsedToken.bootstrapId.length > 0
+        && connector.bootstrapId === parsedToken.bootstrapId
+        && !!connector.bootstrapConsumedAtIso
+    })
+    if (consumedIndex === -1) continue
     return {
       scope: { cacheKey: `user:${userId}`, userId },
       state: registry,
-      connector: registry.connectors[connectorIndex],
-      index: connectorIndex,
+      connector: registry.connectors[consumedIndex],
+      index: consumedIndex,
+      matchedConsumedBootstrap: true,
     }
   }
 
@@ -1491,44 +1560,71 @@ function buildRelayPerClientRateLimitKey(req: IncomingMessage): string {
   return `${clientAddress}:${hashRelayRateLimitToken(token)}`
 }
 
-function compactRelayRateLimitRecords(
+type EndpointRateLimitPolicy = {
+  windowMs: number
+  blockMs: number
+  maxEntries: number
+  maxPerIp: number
+  maxPerClientKey: number
+}
+
+const RELAY_ENDPOINT_RATE_LIMIT_POLICY: EndpointRateLimitPolicy = {
+  windowMs: RELAY_AGENT_RATE_LIMIT_WINDOW_MS,
+  blockMs: RELAY_AGENT_RATE_LIMIT_BLOCK_MS,
+  maxEntries: RELAY_AGENT_RATE_LIMIT_MAX_ENTRIES,
+  maxPerIp: RELAY_AGENT_RATE_LIMIT_MAX_PER_IP,
+  maxPerClientKey: RELAY_AGENT_RATE_LIMIT_MAX_PER_CLIENT_KEY,
+}
+
+const BOOTSTRAP_EXCHANGE_RATE_LIMIT_POLICY: EndpointRateLimitPolicy = {
+  windowMs: BOOTSTRAP_EXCHANGE_RATE_LIMIT_WINDOW_MS,
+  blockMs: BOOTSTRAP_EXCHANGE_RATE_LIMIT_BLOCK_MS,
+  maxEntries: BOOTSTRAP_EXCHANGE_RATE_LIMIT_MAX_ENTRIES,
+  maxPerIp: BOOTSTRAP_EXCHANGE_RATE_LIMIT_MAX_PER_IP,
+  maxPerClientKey: BOOTSTRAP_EXCHANGE_RATE_LIMIT_MAX_PER_CLIENT_KEY,
+}
+
+function compactEndpointRateLimitRecords(
   recordsByKey: Map<string, RelayEndpointRateLimitRecord>,
   nowMs: number,
+  policy: Pick<EndpointRateLimitPolicy, 'windowMs' | 'blockMs' | 'maxEntries'>,
 ): void {
-  if (recordsByKey.size < RELAY_AGENT_RATE_LIMIT_MAX_ENTRIES) return
+  if (recordsByKey.size < policy.maxEntries) return
 
   for (const [key, record] of recordsByKey.entries()) {
     const latestKnownMs = Math.max(record.windowStartedAtMs, record.blockedUntilMs)
-    if (nowMs - latestKnownMs > RELAY_AGENT_RATE_LIMIT_WINDOW_MS + RELAY_AGENT_RATE_LIMIT_BLOCK_MS) {
+    if (nowMs - latestKnownMs > policy.windowMs + policy.blockMs) {
       recordsByKey.delete(key)
     }
   }
 }
 
-function enforceRelayRateLimitCapacity(
+function enforceEndpointRateLimitCapacity(
   recordsByKey: Map<string, RelayEndpointRateLimitRecord>,
   targetKey: string,
   nowMs: number,
+  policy: Pick<EndpointRateLimitPolicy, 'windowMs' | 'blockMs' | 'maxEntries'>,
 ): void {
-  compactRelayRateLimitRecords(recordsByKey, nowMs)
-  if (recordsByKey.size < RELAY_AGENT_RATE_LIMIT_MAX_ENTRIES || recordsByKey.has(targetKey)) return
+  compactEndpointRateLimitRecords(recordsByKey, nowMs, policy)
+  if (recordsByKey.size < policy.maxEntries || recordsByKey.has(targetKey)) return
 
-  while (recordsByKey.size >= RELAY_AGENT_RATE_LIMIT_MAX_ENTRIES) {
+  while (recordsByKey.size >= policy.maxEntries) {
     const oldest = recordsByKey.keys().next().value
     if (!oldest) return
     recordsByKey.delete(oldest)
   }
 }
 
-function consumeRelayRateLimitForKey(
+function consumeEndpointRateLimitForKey(
   key: string,
   maxRequestsPerWindow: number,
   recordsByKey: Map<string, RelayEndpointRateLimitRecord>,
   nowMs: number,
+  policy: Pick<EndpointRateLimitPolicy, 'windowMs' | 'blockMs' | 'maxEntries'>,
 ): { limited: boolean; retryAfterSeconds: number } {
   const existing = recordsByKey.get(key)
   if (!existing) {
-    enforceRelayRateLimitCapacity(recordsByKey, key, nowMs)
+    enforceEndpointRateLimitCapacity(recordsByKey, key, nowMs, policy)
     recordsByKey.set(key, {
       requests: 1,
       windowStartedAtMs: nowMs,
@@ -1544,7 +1640,7 @@ function consumeRelayRateLimitForKey(
     }
   }
 
-  if (nowMs - existing.windowStartedAtMs >= RELAY_AGENT_RATE_LIMIT_WINDOW_MS) {
+  if (nowMs - existing.windowStartedAtMs >= policy.windowMs) {
     recordsByKey.set(key, {
       requests: 1,
       windowStartedAtMs: nowMs,
@@ -1555,7 +1651,7 @@ function consumeRelayRateLimitForKey(
 
   const nextRequests = existing.requests + 1
   if (nextRequests > maxRequestsPerWindow) {
-    const blockedUntilMs = nowMs + RELAY_AGENT_RATE_LIMIT_BLOCK_MS
+    const blockedUntilMs = nowMs + policy.blockMs
     recordsByKey.set(key, {
       requests: nextRequests,
       windowStartedAtMs: existing.windowStartedAtMs,
@@ -1580,25 +1676,44 @@ function consumeRelayEndpointRateLimit(
   recordsByIp: Map<string, RelayEndpointRateLimitRecord>,
   recordsByClientKey: Map<string, RelayEndpointRateLimitRecord>,
 ): { limited: boolean; retryAfterSeconds: number } {
-  const nowMs = Date.now()
-  compactRelayRateLimitRecords(recordsByIp, nowMs)
-  compactRelayRateLimitRecords(recordsByClientKey, nowMs)
+  return consumeEndpointRateLimit(req, recordsByIp, recordsByClientKey, RELAY_ENDPOINT_RATE_LIMIT_POLICY)
+}
 
-  const ipDecision = consumeRelayRateLimitForKey(
+function consumeBootstrapExchangeRateLimit(
+  req: IncomingMessage,
+  recordsByIp: Map<string, RelayEndpointRateLimitRecord>,
+  recordsByClientKey: Map<string, RelayEndpointRateLimitRecord>,
+): { limited: boolean; retryAfterSeconds: number } {
+  return consumeEndpointRateLimit(req, recordsByIp, recordsByClientKey, BOOTSTRAP_EXCHANGE_RATE_LIMIT_POLICY)
+}
+
+function consumeEndpointRateLimit(
+  req: IncomingMessage,
+  recordsByIp: Map<string, RelayEndpointRateLimitRecord>,
+  recordsByClientKey: Map<string, RelayEndpointRateLimitRecord>,
+  policy: EndpointRateLimitPolicy,
+): { limited: boolean; retryAfterSeconds: number } {
+  const nowMs = Date.now()
+  compactEndpointRateLimitRecords(recordsByIp, nowMs, policy)
+  compactEndpointRateLimitRecords(recordsByClientKey, nowMs, policy)
+
+  const ipDecision = consumeEndpointRateLimitForKey(
     buildRelayPerIpRateLimitKey(req),
-    RELAY_AGENT_RATE_LIMIT_MAX_PER_IP,
+    policy.maxPerIp,
     recordsByIp,
     nowMs,
+    policy,
   )
   if (ipDecision.limited) {
     return ipDecision
   }
 
-  return consumeRelayRateLimitForKey(
+  return consumeEndpointRateLimitForKey(
     buildRelayPerClientRateLimitKey(req),
-    RELAY_AGENT_RATE_LIMIT_MAX_PER_CLIENT_KEY,
+    policy.maxPerClientKey,
     recordsByClientKey,
     nowMs,
+    policy,
   )
 }
 
@@ -2554,6 +2669,8 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
   const { runtimeRegistry, relayHub } = getSharedBridgeState()
   const relayRateLimitByIp = new Map<string, RelayEndpointRateLimitRecord>()
   const relayRateLimitByClientKey = new Map<string, RelayEndpointRateLimitRecord>()
+  const bootstrapExchangeRateLimitByIp = new Map<string, RelayEndpointRateLimitRecord>()
+  const bootstrapExchangeRateLimitByClientKey = new Map<string, RelayEndpointRateLimitRecord>()
 
   function enforceRelayRateLimit(req: IncomingMessage, res: ServerResponse): boolean {
     const decision = consumeRelayEndpointRateLimit(req, relayRateLimitByIp, relayRateLimitByClientKey)
@@ -2562,6 +2679,18 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
     res.setHeader('Retry-After', String(decision.retryAfterSeconds))
     setJson(res, 429, {
       error: 'Too many relay agent requests. Try again later.',
+      retryAfterSeconds: decision.retryAfterSeconds,
+    })
+    return false
+  }
+
+  function enforceBootstrapExchangeRateLimit(req: IncomingMessage, res: ServerResponse): boolean {
+    const decision = consumeBootstrapExchangeRateLimit(req, bootstrapExchangeRateLimitByIp, bootstrapExchangeRateLimitByClientKey)
+    if (!decision.limited) return true
+
+    res.setHeader('Retry-After', String(decision.retryAfterSeconds))
+    setJson(res, 429, {
+      error: 'Too many bootstrap exchange attempts. Try again later.',
       retryAfterSeconds: decision.retryAfterSeconds,
     })
     return false
@@ -2687,7 +2816,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         const requestedBootstrapTtlMs = typeof payload.bootstrapTtlMs === 'number' && Number.isFinite(payload.bootstrapTtlMs)
           ? Math.trunc(payload.bootstrapTtlMs)
           : CONNECTOR_BOOTSTRAP_TTL_MS
-        const bootstrapToken = createConnectorSecretToken()
+        const bootstrapSecret = createConnectorBootstrapSecret()
         const connector: CodexConnectorRecord = {
           id: connectorId,
           serverId: connectorId,
@@ -2697,7 +2826,8 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           ...(relayE2ee?.keyId ? { relayE2eeKeyId: relayE2ee.keyId } : {}),
           createdAtIso: created.agent.createdAtIso,
           updatedAtIso: created.agent.updatedAtIso,
-          bootstrapTokenHash: hashConnectorSecret(bootstrapToken),
+          bootstrapId: bootstrapSecret.bootstrapId,
+          bootstrapTokenHash: bootstrapSecret.tokenHash,
           bootstrapIssuedAtIso,
           bootstrapExpiresAtIso: getBootstrapExpiryIso(bootstrapIssuedAtIso, requestedBootstrapTtlMs),
         }
@@ -2715,7 +2845,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         setJson(res, 201, {
           data: {
             connector: toPublicConnectorRecord(connector, relayHub),
-            bootstrapToken,
+            bootstrapToken: bootstrapSecret.token,
           },
         })
         return
@@ -2729,6 +2859,9 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         }
 
         if (req.method === 'POST' && connectorResource.action === 'bootstrap-exchange') {
+          if (!enforceBootstrapExchangeRateLimit(req, res)) {
+            return
+          }
           const bootstrapLookup = await findConnectorByBootstrapToken(connectorId, readBearerToken(req))
           if (!bootstrapLookup) {
             setJson(res, 401, { error: 'Invalid bootstrap token' })
@@ -2736,6 +2869,10 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           }
 
           const { scope, state, connector: currentConnector, index } = bootstrapLookup
+          if (bootstrapLookup.matchedConsumedBootstrap || currentConnector.bootstrapConsumedAtIso) {
+            setJson(res, 409, { error: 'Bootstrap token already consumed' })
+            return
+          }
           if (isBootstrapExpired(currentConnector)) {
             const expiredConnector: CodexConnectorRecord = {
               ...currentConnector,
@@ -2747,10 +2884,6 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             setJson(res, 410, { error: 'Bootstrap token expired' })
             return
           }
-          if (currentConnector.bootstrapConsumedAtIso) {
-            setJson(res, 409, { error: 'Bootstrap token already consumed' })
-            return
-          }
 
           const issued = relayHub.issueAgentToken(currentConnector.relayAgentId)
           const nowIso = new Date().toISOString()
@@ -2759,6 +2892,8 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             credentialHash: issued.tokenHash,
             credentialIssuedAtIso: nowIso,
             bootstrapConsumedAtIso: nowIso,
+            bootstrapTokenHash: undefined,
+            bootstrapExpiresAtIso: undefined,
             updatedAtIso: nowIso,
           }
           const nextConnectors = [...state.connectors]
@@ -2856,12 +2991,13 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           relayHub.clearAgentToken(currentConnector.relayAgentId)
           const nowIso = new Date().toISOString()
           const requestedBootstrapTtlMs = CONNECTOR_BOOTSTRAP_TTL_MS
-          const bootstrapToken = createConnectorSecretToken()
+          const bootstrapSecret = createConnectorBootstrapSecret()
           const nextConnector: CodexConnectorRecord = {
             ...currentConnector,
             credentialHash: undefined,
             credentialIssuedAtIso: currentConnector.credentialIssuedAtIso,
-            bootstrapTokenHash: hashConnectorSecret(bootstrapToken),
+            bootstrapId: bootstrapSecret.bootstrapId,
+            bootstrapTokenHash: bootstrapSecret.tokenHash,
             bootstrapIssuedAtIso: nowIso,
             bootstrapExpiresAtIso: getBootstrapExpiryIso(nowIso, requestedBootstrapTtlMs),
             bootstrapConsumedAtIso: undefined,
@@ -2877,7 +3013,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
                 threadCount: nextConnector.lastKnownThreadCount,
                 lastStatsAtIso: nextConnector.lastStatsAtIso,
               }),
-              bootstrapToken,
+              bootstrapToken: bootstrapSecret.token,
             },
           })
           return

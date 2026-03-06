@@ -326,7 +326,7 @@ function formatInstallStateLabel(state: CodexConnectorInfo['installState']): str
 function buildInstallCommand(connector: CodexConnectorInfo): string {
   const encodedHub = JSON.stringify(connector.hubAddress)
   const encodedConnectorId = JSON.stringify(connector.id)
-  const encodedTokenFile = JSON.stringify(`~/.codexui-connector/${connector.id}.token`)
+  const encodedTokenFile = JSON.stringify(`$HOME/.codexui-connector/${connector.id}.token`)
   const parts = [
     'npx codexui-connector install',
     `--hub ${encodedHub}`,

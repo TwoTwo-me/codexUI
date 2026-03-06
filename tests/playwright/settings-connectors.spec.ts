@@ -272,6 +272,7 @@ test('settings page manages connector bootstrap lifecycle end-to-end', async ({ 
   await expect(page.locator('input[value="Alpha Laptop"]').first()).toBeVisible()
   await expect(page.getByLabel('Suggested install command')).toHaveValue(/codexui-connector install/)
   await expect(page.getByLabel('Suggested install command')).toHaveValue(/--token-file/)
+  await expect(page.getByLabel('Suggested install command')).toHaveValue(/\$HOME\/\.codexui-connector\/alpha-laptop\.token/)
   await expect(page.getByText('Bootstrap expires')).toBeVisible()
 
   await page.getByRole('button', { name: 'Edit name' }).click()

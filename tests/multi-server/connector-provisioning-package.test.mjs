@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -98,6 +99,8 @@ test('connector package provisions a connector via hub login and returns an inst
     assert.match(installCommand, /codexui-connector install/)
     assert.match(installCommand, /edge-laptop/)
     assert.match(installCommand, /--token-file/)
+    assert.match(installCommand, /\$HOME\/\.codexui-connector\/edge-laptop\.token/)
+    assert.doesNotMatch(installCommand, /"~\//)
     assert.doesNotMatch(installCommand, /install-token-123/)
   } finally {
     await new Promise((resolve, reject) => {
@@ -110,6 +113,53 @@ test('connector package provisions a connector via hub login and returns an inst
       })
     })
   }
+})
+
+test('connector package expands home-relative token file paths before writing credentials', async () => {
+  const module = await loadConnectorModule()
+  assert.equal(typeof module.writeConnectorTokenFile, 'function')
+
+  const fakeHome = await mkdtemp(resolve(tmpdir(), 'codexui-home-'))
+  const originalHome = process.env.HOME
+  process.env.HOME = fakeHome
+
+  try {
+    await module.writeConnectorTokenFile('~/.codexui-connector/edge-laptop.token', 'durable-token-456')
+    const persisted = await readFile(resolve(fakeHome, '.codexui-connector/edge-laptop.token'), 'utf8')
+    assert.equal(persisted, 'durable-token-456')
+  } finally {
+    process.env.HOME = originalHome
+  }
+})
+
+test('connector install command refuses bootstrap input that would discard the durable credential', async () => {
+  const connectorEntrypoint = resolve(repoDir, 'dist-cli/connector.js')
+  const result = spawnSync(
+    'node',
+    [
+      connectorEntrypoint,
+      'install',
+      '--hub',
+      'http://127.0.0.1:47893',
+      '--connector',
+      'edge-laptop',
+      '--token',
+      'bootstrap-token-123',
+      '--allow-insecure-http',
+    ],
+    {
+      cwd: repoDir,
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+      },
+      encoding: 'utf8',
+    },
+  )
+
+  assert.notEqual(result.status, 0)
+  assert.match(`${result.stdout}\n${result.stderr}`, /--token-file/i)
+  assert.match(`${result.stdout}\n${result.stderr}`, /--run/i)
 })
 
 test('connector package exchanges a bootstrap token and rewrites the token file with the durable credential', async () => {
