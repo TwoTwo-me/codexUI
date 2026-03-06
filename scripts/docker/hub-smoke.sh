@@ -74,10 +74,14 @@ async function main() {
   process.exit(0)
 }
 
-main().catch((error) => {
-  console.error(`[hub-smoke] ${error instanceof Error ? error.message : String(error)}`)
-  process.exit(1)
-})
+main()
+  .then(() => {
+    process.exit(0)
+  })
+  .catch((error) => {
+    console.error(`[hub-smoke] ${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  })
 EOF_NODE
 
 echo "[hub-smoke] Container has codex auth + CLI and authenticated successfully"

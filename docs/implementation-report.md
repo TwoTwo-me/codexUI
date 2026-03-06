@@ -108,6 +108,9 @@
 ### Validation
 - `npm run build` ✅
 - `docker compose config` ✅
+- `npm run docker:hub:prepare-auth` ✅
+- `npm run docker:hub:up` ✅
+- `npm run docker:hub:smoke` ✅
 
 ---
 
