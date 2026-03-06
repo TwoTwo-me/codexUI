@@ -5,7 +5,7 @@
         <p class="settings-panel-eyebrow">Connectors</p>
         <h2 class="settings-panel-title">Connector control panel</h2>
         <p class="settings-panel-subtitle">
-          Register outbound connectors for each remote Codex host and manage their lifecycle from one hub.
+          Register outbound connectors for each remote Codex host and manage bootstrap, reinstall, and runtime status from one hub.
         </p>
       </div>
       <button type="button" class="settings-panel-refresh" :disabled="isLoading" @click="void refreshConnectors()">
@@ -84,8 +84,8 @@
             >
               <span class="connector-list-row">
                 <span class="connector-list-name">{{ connector.name }}</span>
-                <span class="connector-status-pill" :data-state="connector.connected ? 'online' : 'offline'">
-                  {{ connector.connected ? 'Connected' : 'Offline' }}
+                <span class="connector-status-pill" :data-state="statusPillTone(connector.installState)">
+                  {{ formatInstallStateLabel(connector.installState) }}
                 </span>
               </span>
               <span class="connector-list-meta">{{ connector.id }} · {{ connector.serverId }}</span>
@@ -102,7 +102,7 @@
           <div class="settings-card-header">
             <div>
               <h3 class="settings-card-title">Connector details</h3>
-              <p class="settings-card-subtitle">Status, install token, and lifecycle actions for the selected connector.</p>
+              <p class="settings-card-subtitle">Lifecycle state, bootstrap metadata, and management actions for the selected connector.</p>
             </div>
           </div>
 
@@ -134,13 +134,21 @@
           </div>
 
           <div class="connector-summary-bar">
-            <span class="connector-status-pill" :data-state="selectedConnector.connected ? 'online' : 'offline'">
-              {{ selectedConnector.connected ? 'Connected' : 'Offline' }}
+            <span class="connector-status-pill" :data-state="statusPillTone(selectedConnector.installState)">
+              {{ formatInstallStateLabel(selectedConnector.installState) }}
             </span>
+            <span>{{ selectedConnector.connected ? 'Transport online' : 'Transport offline' }}</span>
             <span>{{ formatProjectCount(selectedConnector) }}</span>
             <span>{{ formatThreadCount(selectedConnector) }}</span>
             <span v-if="selectedConnector.lastSeenAtIso">Last seen {{ formatDate(selectedConnector.lastSeenAtIso) }}</span>
             <span v-else>Last seen —</span>
+          </div>
+
+          <div class="settings-status-meta">
+            <p v-if="selectedConnector.bootstrapIssuedAtIso">Bootstrap issued {{ formatDate(selectedConnector.bootstrapIssuedAtIso) }}</p>
+            <p v-if="selectedConnector.bootstrapExpiresAtIso">Bootstrap expires {{ formatDate(selectedConnector.bootstrapExpiresAtIso) }}</p>
+            <p v-if="selectedConnector.bootstrapConsumedAtIso">Bootstrap consumed {{ formatDate(selectedConnector.bootstrapConsumedAtIso) }}</p>
+            <p v-if="selectedConnector.credentialIssuedAtIso">Credential issued {{ formatDate(selectedConnector.credentialIssuedAtIso) }}</p>
           </div>
 
           <div v-if="isRenaming" class="settings-inline-form">
@@ -160,7 +168,7 @@
           <div v-else class="settings-action-row">
             <button type="button" class="settings-secondary-button" @click="startRename">Edit name</button>
             <button type="button" class="settings-secondary-button" :disabled="isRotating" @click="void rotateToken()">
-              {{ isRotating ? 'Rotating…' : 'Rotate token' }}
+              {{ isRotating ? 'Reissuing…' : 'Reissue install token' }}
             </button>
             <button type="button" class="settings-danger-button" :disabled="isDeleting" @click="requestDelete">
               Delete connector
@@ -182,18 +190,18 @@
       </section>
     </div>
 
-    <section v-if="latestInstallArtifact" class="settings-card settings-install-card">
+    <section v-if="selectedInstallArtifact" class="settings-card settings-install-card">
       <div class="settings-card-header">
         <div>
           <h3 class="settings-card-title">Connector install artifact</h3>
-          <p class="settings-card-subtitle">Use the token once when installing the remote connector process.</p>
+          <p class="settings-card-subtitle">Reveal the one-time bootstrap token and install command for the selected connector.</p>
         </div>
       </div>
 
-      <p class="settings-install-once">Installation token is only shown once.</p>
+      <p class="settings-install-once">Bootstrap token is only shown once.</p>
 
       <label class="settings-field">
-        <span class="settings-field-label">Token</span>
+        <span class="settings-field-label">Bootstrap token</span>
         <div class="settings-inline-actions settings-inline-actions-tight">
           <button type="button" class="settings-secondary-button" @click="toggleTokenReveal">
             {{ isTokenRevealed ? 'Hide token' : 'Reveal token' }}
@@ -202,16 +210,16 @@
         <textarea
           class="settings-code-block"
           readonly
-          :value="isTokenRevealed ? latestInstallArtifact.token : '••••••••••••••••'"
+          :value="isTokenRevealed ? selectedInstallArtifact.token : '••••••••••••••••'"
         ></textarea>
         <p class="settings-field-help">
-          Save this token to a secure file on the connector host before running the install command.
+          Save this bootstrap token to a secure file on the connector host. The install step rewrites the same file with the durable credential.
         </p>
       </label>
 
       <label class="settings-field">
         <span class="settings-field-label">Suggested install command</span>
-        <textarea class="settings-code-block settings-code-block-large" readonly :value="latestInstallArtifact.command"></textarea>
+        <textarea class="settings-code-block settings-code-block-large" readonly :value="selectedInstallArtifact.command"></textarea>
       </label>
     </section>
   </section>
@@ -262,6 +270,15 @@ const selectedConnector = computed<CodexConnectorInfo | null>(() => {
   return connectors.value.find((connector) => connector.id === selectedConnectorId.value) ?? connectors.value[0] ?? null
 })
 
+const selectedInstallArtifact = computed<InstallArtifact | null>(() => {
+  const artifact = latestInstallArtifact.value
+  const connector = selectedConnector.value
+  if (!artifact || !connector || artifact.connectorId !== connector.id) {
+    return null
+  }
+  return artifact
+})
+
 function normalizeSelection(nextRows: CodexConnectorInfo[]): void {
   if (nextRows.length === 0) {
     selectedConnectorId.value = ''
@@ -274,19 +291,59 @@ function normalizeSelection(nextRows: CodexConnectorInfo[]): void {
   selectedConnectorId.value = nextRows[0].id
 }
 
-function buildInstallCommand(connector: CodexConnectorInfo, token: string): string {
+function statusPillTone(state: CodexConnectorInfo['installState']): 'connected' | 'offline' | 'pending' | 'expired' | 'reinstall' {
+  switch (state) {
+    case 'connected':
+      return 'connected'
+    case 'offline':
+      return 'offline'
+    case 'expired_bootstrap':
+      return 'expired'
+    case 'reinstall_required':
+      return 'reinstall'
+    case 'pending_install':
+    default:
+      return 'pending'
+  }
+}
+
+function formatInstallStateLabel(state: CodexConnectorInfo['installState']): string {
+  switch (state) {
+    case 'connected':
+      return 'Connected'
+    case 'offline':
+      return 'Offline'
+    case 'expired_bootstrap':
+      return 'Expired bootstrap'
+    case 'reinstall_required':
+      return 'Reinstall required'
+    case 'pending_install':
+    default:
+      return 'Pending install'
+  }
+}
+
+function buildInstallCommand(connector: CodexConnectorInfo): string {
   const encodedHub = JSON.stringify(connector.hubAddress)
   const encodedConnectorId = JSON.stringify(connector.id)
   const encodedTokenFile = JSON.stringify(`~/.codexui-connector/${connector.id}.token`)
-  void token
-  return `npx codexui-connector connect --hub ${encodedHub} --connector ${encodedConnectorId} --token-file ${encodedTokenFile}`
+  const parts = [
+    'npx codexui-connector install',
+    `--hub ${encodedHub}`,
+    `--connector ${encodedConnectorId}`,
+    `--token-file ${encodedTokenFile}`,
+  ]
+  if (connector.hubAddress.startsWith('http://')) {
+    parts.push('--allow-insecure-http')
+  }
+  return parts.join(' ')
 }
 
 function setLatestInstallArtifact(connector: CodexConnectorInfo, token: string): void {
   latestInstallArtifact.value = {
     connectorId: connector.id,
     token,
-    command: buildInstallCommand(connector, token),
+    command: buildInstallCommand(connector),
   }
   isTokenRevealed.value = false
 }
@@ -352,7 +409,7 @@ async function createConnector(): Promise<void> {
     connectors.value = [created.connector, ...connectors.value]
     selectedConnectorId.value = created.connector.id
     latestInstallArtifact.value = null
-    setLatestInstallArtifact(created.connector, created.token)
+    setLatestInstallArtifact(created.connector, created.bootstrapToken)
     pendingDeleteConnectorId.value = ''
     isRenaming.value = false
     emit('connectors-changed')
@@ -403,9 +460,9 @@ async function rotateToken(): Promise<void> {
   try {
     const rotated = await rotateConnectorRegistrationToken(connector.id)
     connectors.value = connectors.value.map((entry) => (entry.id === connector.id ? rotated.connector : entry))
-    setLatestInstallArtifact(rotated.connector, rotated.token)
+    setLatestInstallArtifact(rotated.connector, rotated.bootstrapToken)
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : 'Failed to rotate token'
+    errorMessage.value = error instanceof Error ? error.message : 'Failed to reissue install token'
   } finally {
     isRotating.value = false
   }
@@ -560,12 +617,24 @@ onMounted(() => {
   @apply inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.05em];
 }
 
-.connector-status-pill[data-state='online'] {
+.connector-status-pill[data-state='connected'] {
   @apply bg-emerald-100 text-emerald-700;
 }
 
 .connector-status-pill[data-state='offline'] {
   @apply bg-zinc-200 text-zinc-600;
+}
+
+.connector-status-pill[data-state='pending'] {
+  @apply bg-amber-100 text-amber-700;
+}
+
+.connector-status-pill[data-state='expired'] {
+  @apply bg-rose-100 text-rose-700;
+}
+
+.connector-status-pill[data-state='reinstall'] {
+  @apply bg-violet-100 text-violet-700;
 }
 
 .settings-detail-grid {
@@ -574,6 +643,14 @@ onMounted(() => {
 
 .connector-summary-bar {
   @apply flex flex-wrap items-center gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-600;
+}
+
+.settings-status-meta {
+  @apply flex flex-col gap-1 rounded-2xl border border-zinc-200 bg-zinc-50 px-3 py-3 text-sm text-zinc-600;
+}
+
+.settings-status-meta p {
+  @apply m-0;
 }
 
 .settings-inline-form {

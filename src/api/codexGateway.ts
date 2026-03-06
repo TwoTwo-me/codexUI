@@ -53,6 +53,11 @@ export type CodexConnectorInfo = {
   relayE2eeKeyId?: string
   createdAtIso: string
   updatedAtIso: string
+  installState: 'pending_install' | 'connected' | 'offline' | 'expired_bootstrap' | 'reinstall_required'
+  bootstrapIssuedAtIso?: string
+  bootstrapExpiresAtIso?: string
+  bootstrapConsumedAtIso?: string
+  credentialIssuedAtIso?: string
   connected: boolean
   lastSeenAtIso?: string
   projectCount?: number
@@ -73,12 +78,12 @@ export type ConnectorCreateInput = {
 
 export type ConnectorCreateResult = {
   connector: CodexConnectorInfo
-  token: string
+  bootstrapToken: string
 }
 
 export type ConnectorRotateTokenResult = {
   connector: CodexConnectorInfo
-  token: string
+  bootstrapToken: string
 }
 
 let activeServerId = ''
@@ -650,6 +655,17 @@ function normalizeConnectorInfo(payload: unknown): CodexConnectorInfo | null {
   }
 
   const relayE2eeKeyId = readString(record.relayE2eeKeyId) || undefined
+  const installStateRaw = readString(record.installState)
+  const installState = installStateRaw === 'connected'
+    || installStateRaw === 'offline'
+    || installStateRaw === 'expired_bootstrap'
+    || installStateRaw === 'reinstall_required'
+    ? installStateRaw
+    : 'pending_install'
+  const bootstrapIssuedAtIso = readString(record.bootstrapIssuedAtIso) || undefined
+  const bootstrapExpiresAtIso = readString(record.bootstrapExpiresAtIso) || undefined
+  const bootstrapConsumedAtIso = readString(record.bootstrapConsumedAtIso) || undefined
+  const credentialIssuedAtIso = readString(record.credentialIssuedAtIso) || undefined
   const lastSeenAtIso = readString(record.lastSeenAtIso) || undefined
   const lastStatsAtIso = readString(record.lastStatsAtIso) || undefined
   const projectCount = typeof record.projectCount === 'number' && Number.isFinite(record.projectCount)
@@ -668,6 +684,11 @@ function normalizeConnectorInfo(payload: unknown): CodexConnectorInfo | null {
     ...(relayE2eeKeyId ? { relayE2eeKeyId } : {}),
     createdAtIso,
     updatedAtIso,
+    installState,
+    ...(bootstrapIssuedAtIso ? { bootstrapIssuedAtIso } : {}),
+    ...(bootstrapExpiresAtIso ? { bootstrapExpiresAtIso } : {}),
+    ...(bootstrapConsumedAtIso ? { bootstrapConsumedAtIso } : {}),
+    ...(credentialIssuedAtIso ? { credentialIssuedAtIso } : {}),
     connected: record.connected === true,
     ...(lastSeenAtIso ? { lastSeenAtIso } : {}),
     ...(projectCount !== undefined ? { projectCount } : {}),
@@ -722,11 +743,11 @@ export async function createConnectorRegistration(input: ConnectorCreateInput): 
   const envelope = asRecord(payload)
   const data = asRecord(envelope?.data)
   const connector = normalizeConnectorInfo(data?.connector)
-  const token = readString(data?.token)
-  if (!connector || !token) {
+  const bootstrapToken = readString(data?.bootstrapToken)
+  if (!connector || !bootstrapToken) {
     throw new Error('Connector creation returned an incomplete response')
   }
-  return { connector, token }
+  return { connector, bootstrapToken }
 }
 
 export async function renameConnectorRegistration(
@@ -766,11 +787,11 @@ export async function rotateConnectorRegistrationToken(connectorId: string): Pro
   const envelope = asRecord(payload)
   const data = asRecord(envelope?.data)
   const connector = normalizeConnectorInfo(data?.connector)
-  const token = readString(data?.token)
-  if (!connector || !token) {
+  const bootstrapToken = readString(data?.bootstrapToken)
+  if (!connector || !bootstrapToken) {
     throw new Error('Connector token rotation returned an incomplete response')
   }
-  return { connector, token }
+  return { connector, bootstrapToken }
 }
 
 export async function deleteConnectorRegistration(connectorId: string): Promise<CodexConnectorInfo[]> {
