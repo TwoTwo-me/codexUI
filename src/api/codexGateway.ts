@@ -44,6 +44,43 @@ export type CodexServerDirectory = {
   servers: CodexServerInfo[]
 }
 
+export type CodexConnectorInfo = {
+  id: string
+  serverId: string
+  name: string
+  hubAddress: string
+  relayAgentId: string
+  relayE2eeKeyId?: string
+  createdAtIso: string
+  updatedAtIso: string
+  connected: boolean
+  lastSeenAtIso?: string
+  projectCount?: number
+  threadCount?: number
+  lastStatsAtIso?: string
+  statsStale?: boolean
+}
+
+export type ConnectorCreateInput = {
+  id: string
+  name: string
+  hubAddress: string
+  e2ee?: {
+    enabled?: boolean
+    keyId: string
+  }
+}
+
+export type ConnectorCreateResult = {
+  connector: CodexConnectorInfo
+  token: string
+}
+
+export type ConnectorRotateTokenResult = {
+  connector: CodexConnectorInfo
+  token: string
+}
+
 let activeServerId = ''
 const serverInfoById = new Map<string, CodexServerInfo>()
 const relayE2eePassphraseByServerId = new Map<string, string>()
@@ -595,6 +632,158 @@ function getErrorMessageFromPayload(payload: unknown, fallback: string): string 
     : {}
   const error = record.error
   return typeof error === 'string' && error.trim().length > 0 ? error : fallback
+}
+
+function normalizeConnectorInfo(payload: unknown): CodexConnectorInfo | null {
+  const record = asRecord(payload)
+  if (!record) return null
+
+  const id = readString(record.id)
+  const serverId = readString(record.serverId) || id
+  const name = readString(record.name) || id
+  const hubAddress = readString(record.hubAddress)
+  const relayAgentId = readString(record.relayAgentId)
+  const createdAtIso = readString(record.createdAtIso)
+  const updatedAtIso = readString(record.updatedAtIso)
+  if (!id || !serverId || !name || !hubAddress || !relayAgentId || !createdAtIso || !updatedAtIso) {
+    return null
+  }
+
+  const relayE2eeKeyId = readString(record.relayE2eeKeyId) || undefined
+  const lastSeenAtIso = readString(record.lastSeenAtIso) || undefined
+  const lastStatsAtIso = readString(record.lastStatsAtIso) || undefined
+  const projectCount = typeof record.projectCount === 'number' && Number.isFinite(record.projectCount)
+    ? Math.max(0, Math.trunc(record.projectCount))
+    : undefined
+  const threadCount = typeof record.threadCount === 'number' && Number.isFinite(record.threadCount)
+    ? Math.max(0, Math.trunc(record.threadCount))
+    : undefined
+
+  return {
+    id,
+    serverId,
+    name,
+    hubAddress,
+    relayAgentId,
+    ...(relayE2eeKeyId ? { relayE2eeKeyId } : {}),
+    createdAtIso,
+    updatedAtIso,
+    connected: record.connected === true,
+    ...(lastSeenAtIso ? { lastSeenAtIso } : {}),
+    ...(projectCount !== undefined ? { projectCount } : {}),
+    ...(threadCount !== undefined ? { threadCount } : {}),
+    ...(lastStatsAtIso ? { lastStatsAtIso } : {}),
+    ...(typeof record.statsStale === 'boolean' ? { statsStale: record.statsStale } : {}),
+  }
+}
+
+function normalizeConnectorList(payload: unknown): CodexConnectorInfo[] {
+  const root = asRecord(payload)
+  const rows = Array.isArray(root?.connectors) ? root.connectors : Array.isArray(payload) ? payload : []
+  const connectors: CodexConnectorInfo[] = []
+  const seen = new Set<string>()
+  for (const row of rows) {
+    const connector = normalizeConnectorInfo(row)
+    if (!connector || seen.has(connector.id)) continue
+    seen.add(connector.id)
+    connectors.push(connector)
+  }
+  return connectors
+}
+
+export async function getConnectorRegistrations(options: { includeStats?: boolean } = {}): Promise<CodexConnectorInfo[]> {
+  const query = new URLSearchParams()
+  if (options.includeStats) query.set('includeStats', '1')
+  const requestUrl = query.size > 0 ? `/codex-api/connectors?${query.toString()}` : '/codex-api/connectors'
+  const response = await fetch(requestUrl)
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to load connectors'))
+  }
+  const envelope = asRecord(payload)
+  return normalizeConnectorList(envelope?.data)
+}
+
+export async function createConnectorRegistration(input: ConnectorCreateInput): Promise<ConnectorCreateResult> {
+  const response = await fetch('/codex-api/connectors', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: input.id,
+      name: input.name,
+      hubAddress: input.hubAddress,
+      ...(input.e2ee ? { e2ee: input.e2ee } : {}),
+    }),
+  })
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to create connector'))
+  }
+  const envelope = asRecord(payload)
+  const data = asRecord(envelope?.data)
+  const connector = normalizeConnectorInfo(data?.connector)
+  const token = readString(data?.token)
+  if (!connector || !token) {
+    throw new Error('Connector creation returned an incomplete response')
+  }
+  return { connector, token }
+}
+
+export async function renameConnectorRegistration(
+  connectorId: string,
+  input: { name: string },
+): Promise<CodexConnectorInfo> {
+  const normalizedConnectorId = connectorId.trim()
+  const response = await fetch(`/codex-api/connectors/${encodeURIComponent(normalizedConnectorId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: input.name }),
+  })
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to rename connector'))
+  }
+  const envelope = asRecord(payload)
+  const data = asRecord(envelope?.data)
+  const connector = normalizeConnectorInfo(data?.connector)
+  if (!connector) {
+    throw new Error('Connector rename returned an incomplete response')
+  }
+  return connector
+}
+
+export async function rotateConnectorRegistrationToken(connectorId: string): Promise<ConnectorRotateTokenResult> {
+  const normalizedConnectorId = connectorId.trim()
+  const response = await fetch(`/codex-api/connectors/${encodeURIComponent(normalizedConnectorId)}/rotate-token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to rotate connector token'))
+  }
+  const envelope = asRecord(payload)
+  const data = asRecord(envelope?.data)
+  const connector = normalizeConnectorInfo(data?.connector)
+  const token = readString(data?.token)
+  if (!connector || !token) {
+    throw new Error('Connector token rotation returned an incomplete response')
+  }
+  return { connector, token }
+}
+
+export async function deleteConnectorRegistration(connectorId: string): Promise<CodexConnectorInfo[]> {
+  const normalizedConnectorId = connectorId.trim()
+  const response = await fetch(`/codex-api/connectors/${encodeURIComponent(normalizedConnectorId)}`, {
+    method: 'DELETE',
+  })
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to delete connector'))
+  }
+  const envelope = asRecord(payload)
+  return normalizeConnectorList(asRecord(envelope?.data))
 }
 
 export type ThreadTitleCache = { titles: Record<string, string>; order: string[] }

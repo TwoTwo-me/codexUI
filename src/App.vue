@@ -57,6 +57,16 @@
         </button>
 
         <button
+          v-if="!isSidebarCollapsed"
+          class="sidebar-skills-link"
+          :class="{ 'is-active': isSettingsRoute }"
+          type="button"
+          @click="router.push({ name: 'settings' }); isMobile && setSidebarCollapsed(true)"
+        >
+          Settings
+        </button>
+
+        <button
           v-if="!isSidebarCollapsed && isAdminUser"
           class="sidebar-skills-link"
           :class="{ 'is-active': isAdminRoute }"
@@ -134,6 +144,9 @@
               <h2 class="admin-guard-title">Admin access required</h2>
               <p class="admin-guard-subtitle">This page is only available to administrator accounts.</p>
             </section>
+          </template>
+          <template v-else-if="isSettingsRoute">
+            <SettingsPanel @connectors-changed="onConnectorsChanged" />
           </template>
           <template v-else-if="isHomeRoute">
             <div class="content-grid">
@@ -213,6 +226,7 @@ import CwdPicker from './components/content/CwdPicker.vue'
 import ServerPicker from './components/content/ServerPicker.vue'
 import SkillsHub from './components/content/SkillsHub.vue'
 import AdminPanel from './components/content/AdminPanel.vue'
+import SettingsPanel from './components/content/SettingsPanel.vue'
 import SidebarThreadControls from './components/sidebar/SidebarThreadControls.vue'
 import IconTablerSearch from './components/icons/IconTablerSearch.vue'
 import IconTablerX from './components/icons/IconTablerX.vue'
@@ -298,6 +312,7 @@ const knownThreadIdSet = computed(() => {
 const isHomeRoute = computed(() => route.name === 'home')
 const isSkillsRoute = computed(() => route.name === 'skills')
 const isAdminRoute = computed(() => route.name === 'admin')
+const isSettingsRoute = computed(() => route.name === 'settings')
 const isThreadRoute = computed(() => route.name === 'thread')
 type SessionUser = {
   id: string
@@ -329,6 +344,7 @@ const selectedProjectLabel = computed(() => {
 const contentTitle = computed(() => {
   if (isSkillsRoute.value) return 'Skills'
   if (isAdminRoute.value) return 'Admin'
+  if (isSettingsRoute.value) return 'Settings'
   if (isHomeRoute.value) return 'New thread'
   return `${selectedServerLabel.value} / ${selectedProjectLabel.value}`
 })
@@ -365,6 +381,10 @@ onUnmounted(() => {
 
 function onSkillsChanged(): void {
   void refreshSkills()
+}
+
+function onConnectorsChanged(): void {
+  void refreshAll()
 }
 
 function toggleSidebarSearch(): void {
@@ -512,7 +532,7 @@ async function syncThreadSelectionWithRoute(): Promise<void> {
   isRouteSyncInProgress.value = true
 
   try {
-    if (route.name === 'home' || route.name === 'skills') {
+    if (route.name === 'home' || route.name === 'skills' || route.name === 'settings') {
       if (selectedThreadId.value !== '') {
         await selectThread('')
       }
@@ -571,7 +591,7 @@ watch(
   async (threadId) => {
     if (!hasInitialized.value) return
     if (isRouteSyncInProgress.value) return
-    if (isHomeRoute.value || isSkillsRoute.value || isAdminRoute.value) return
+    if (isHomeRoute.value || isSkillsRoute.value || isAdminRoute.value || isSettingsRoute.value) return
 
     if (!threadId) {
       if (route.name !== 'home') {
