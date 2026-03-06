@@ -98,23 +98,34 @@ type ServerRegistryState = {
 
 type CodexConnectorRecord = {
   id: string
+  serverId: string
   name: string
   hubAddress: string
   relayAgentId: string
+  relayE2eeKeyId?: string
   tokenHash: string
+  lastKnownProjectCount?: number
+  lastKnownThreadCount?: number
+  lastStatsAtIso?: string
   createdAtIso: string
   updatedAtIso: string
 }
 
 type CodexConnectorPublicRecord = {
   id: string
+  serverId: string
   name: string
   hubAddress: string
   relayAgentId: string
+  relayE2eeKeyId?: string
   createdAtIso: string
   updatedAtIso: string
   connected: boolean
   lastSeenAtIso?: string
+  projectCount?: number
+  threadCount?: number
+  lastStatsAtIso?: string
+  statsStale?: boolean
 }
 
 type ConnectorRegistryState = {
@@ -719,12 +730,34 @@ function normalizeConnectorRecord(value: unknown, nowIso: string): CodexConnecto
     return null
   }
 
+  const serverId = typeof record.serverId === 'string' && record.serverId.trim().length > 0
+    ? record.serverId.trim()
+    : id
+  if (!isValidServerId(serverId)) {
+    return null
+  }
+
   const name = typeof record.name === 'string' && record.name.trim().length > 0
     ? record.name.trim()
     : id
   const hubAddress = typeof record.hubAddress === 'string' && record.hubAddress.trim().length > 0
     ? record.hubAddress.trim()
     : ''
+  const relayE2eeKeyId = typeof record.relayE2eeKeyId === 'string' && record.relayE2eeKeyId.trim().length > 0
+    ? record.relayE2eeKeyId.trim()
+    : undefined
+  if (relayE2eeKeyId && !RELAY_E2EE_KEY_ID_PATTERN.test(relayE2eeKeyId)) {
+    return null
+  }
+  const lastKnownProjectCount = typeof record.lastKnownProjectCount === 'number' && Number.isFinite(record.lastKnownProjectCount)
+    ? Math.max(0, Math.trunc(record.lastKnownProjectCount))
+    : undefined
+  const lastKnownThreadCount = typeof record.lastKnownThreadCount === 'number' && Number.isFinite(record.lastKnownThreadCount)
+    ? Math.max(0, Math.trunc(record.lastKnownThreadCount))
+    : undefined
+  const lastStatsAtIso = typeof record.lastStatsAtIso === 'string' && record.lastStatsAtIso.trim().length > 0
+    ? record.lastStatsAtIso.trim()
+    : undefined
   const createdAtIso = typeof record.createdAtIso === 'string' && record.createdAtIso.trim().length > 0
     ? record.createdAtIso.trim()
     : nowIso
@@ -734,10 +767,15 @@ function normalizeConnectorRecord(value: unknown, nowIso: string): CodexConnecto
 
   return {
     id,
+    serverId,
     name,
     hubAddress,
     relayAgentId,
+    ...(relayE2eeKeyId ? { relayE2eeKeyId } : {}),
     tokenHash,
+    ...(lastKnownProjectCount !== undefined ? { lastKnownProjectCount } : {}),
+    ...(lastKnownThreadCount !== undefined ? { lastKnownThreadCount } : {}),
+    ...(lastStatsAtIso ? { lastStatsAtIso } : {}),
     createdAtIso,
     updatedAtIso,
   }
@@ -1016,20 +1054,197 @@ function inferHubAddress(req: IncomingMessage): string {
   return normalizeHubAddress(`${protocol}://${host}`)
 }
 
+function buildConnectorBoundServerRecord(
+  connector: Pick<CodexConnectorRecord, 'serverId' | 'name' | 'relayAgentId' | 'relayE2eeKeyId'>,
+  nowIso: string,
+  existing?: CodexServerRecord,
+): CodexServerRecord {
+  return {
+    id: connector.serverId,
+    name: connector.name,
+    transport: 'relay',
+    relay: {
+      agentId: connector.relayAgentId,
+      protocol: DEFAULT_RELAY_PROTOCOL,
+      requestTimeoutMs: DEFAULT_RELAY_TIMEOUT_MS,
+      ...(connector.relayE2eeKeyId
+        ? {
+            e2ee: {
+              keyId: connector.relayE2eeKeyId,
+              algorithm: RELAY_E2EE_ALGORITHM,
+            },
+          }
+        : {}),
+    },
+    createdAtIso: existing?.createdAtIso ?? nowIso,
+    updatedAtIso: nowIso,
+  }
+}
+
+async function upsertConnectorBoundServer(scope: ServerRegistryScope, connector: CodexConnectorRecord): Promise<void> {
+  const state = await readServerRegistryState(scope, { persistNormalized: true })
+  const existingServer = state.servers.find((server) => server.id === connector.serverId)
+  const nextServer = buildConnectorBoundServerRecord(connector, new Date().toISOString(), existingServer)
+  const nextServers = existingServer
+    ? state.servers.map((server) => (server.id === connector.serverId ? nextServer : server))
+    : [...state.servers, nextServer]
+  const nextState: ServerRegistryState = {
+    defaultServerId: state.defaultServerId.trim().length > 0 ? state.defaultServerId : connector.serverId,
+    servers: nextServers,
+  }
+  await writeServerRegistryState(scope, nextState)
+}
+
+async function removeConnectorBoundServer(
+  scope: ServerRegistryScope,
+  serverId: string,
+  runtimeRegistry: AppServerRuntimeRegistry,
+): Promise<void> {
+  const state = await readServerRegistryState(scope, { persistNormalized: true })
+  const existing = state.servers.find((server) => server.id === serverId)
+  if (!existing) {
+    runtimeRegistry.disposeServer(scope.cacheKey, serverId)
+    return
+  }
+  const remainingServers = state.servers.filter((server) => server.id !== serverId)
+  const nextState: ServerRegistryState = {
+    defaultServerId: remainingServers.length === 0
+      ? ''
+      : state.defaultServerId === serverId
+        ? remainingServers[0].id
+        : state.defaultServerId,
+    servers: remainingServers,
+  }
+  await writeServerRegistryState(scope, nextState)
+  runtimeRegistry.disposeServer(scope.cacheKey, serverId)
+}
+
+function summarizeThreadListCounts(payload: unknown): { projectCount: number; threadCount: number } {
+  const record = asRecord(payload)
+  const rows = Array.isArray(record?.data) ? record.data : []
+  const projects = new Set<string>()
+  let threadCount = 0
+
+  for (const row of rows) {
+    const thread = asRecord(row)
+    if (!thread) continue
+    threadCount += 1
+    const cwd = typeof thread.cwd === 'string' ? thread.cwd.trim() : ''
+    if (cwd) {
+      projects.add(cwd)
+    }
+  }
+
+  return {
+    projectCount: projects.size,
+    threadCount,
+  }
+}
+
+async function buildConnectorPublicRecords(
+  connectors: CodexConnectorRecord[],
+  scope: ServerRegistryScope,
+  relayHub: OutboundRelayHub,
+  includeStats: boolean,
+): Promise<{ publicRecords: CodexConnectorPublicRecord[]; nextRecords: CodexConnectorRecord[]; changed: boolean }> {
+  let changed = false
+
+  const rows = await Promise.all(connectors.map(async (connector) => {
+    let nextConnector = connector
+    let projectCount = connector.lastKnownProjectCount
+    let threadCount = connector.lastKnownThreadCount
+    let lastStatsAtIso = connector.lastStatsAtIso
+    let statsStale = false
+
+    const relayAgent = relayHub.getAgent(connector.relayAgentId)
+    if (includeStats) {
+      if (relayAgent?.connected) {
+        try {
+          const result = await relayHub.dispatchRpc(
+            {
+              scopeKey: scope.cacheKey,
+              serverId: connector.serverId,
+              agentId: connector.relayAgentId,
+            },
+            'thread/list',
+            {
+              archived: false,
+              limit: 500,
+              sortKey: 'updated_at',
+            },
+            DEFAULT_RELAY_TIMEOUT_MS,
+          )
+          const stats = summarizeThreadListCounts(result)
+          const refreshedAtIso = new Date().toISOString()
+          projectCount = stats.projectCount
+          threadCount = stats.threadCount
+          lastStatsAtIso = refreshedAtIso
+          nextConnector = {
+            ...connector,
+            lastKnownProjectCount: projectCount,
+            lastKnownThreadCount: threadCount,
+            lastStatsAtIso: refreshedAtIso,
+            updatedAtIso: connector.updatedAtIso,
+          }
+          if (
+            nextConnector.lastKnownProjectCount !== connector.lastKnownProjectCount
+            || nextConnector.lastKnownThreadCount !== connector.lastKnownThreadCount
+            || nextConnector.lastStatsAtIso !== connector.lastStatsAtIso
+          ) {
+            changed = true
+          }
+        } catch {
+          statsStale = projectCount !== undefined || threadCount !== undefined
+        }
+      } else {
+        statsStale = projectCount !== undefined || threadCount !== undefined
+      }
+    }
+
+    return {
+      nextConnector,
+      publicRecord: toPublicConnectorRecord(nextConnector, relayHub, {
+        projectCount,
+        threadCount,
+        lastStatsAtIso,
+        ...(includeStats ? { statsStale } : {}),
+      }),
+    }
+  }))
+
+  return {
+    publicRecords: rows.map((row) => row.publicRecord),
+    nextRecords: rows.map((row) => row.nextConnector),
+    changed,
+  }
+}
+
 function toPublicConnectorRecord(
   connector: CodexConnectorRecord,
   relayHub: OutboundRelayHub,
+  options: {
+    projectCount?: number
+    threadCount?: number
+    lastStatsAtIso?: string
+    statsStale?: boolean
+  } = {},
 ): CodexConnectorPublicRecord {
   const relayAgent = relayHub.getAgent(connector.relayAgentId)
   return {
     id: connector.id,
+    serverId: connector.serverId,
     name: connector.name,
     hubAddress: connector.hubAddress,
     relayAgentId: connector.relayAgentId,
+    ...(connector.relayE2eeKeyId ? { relayE2eeKeyId: connector.relayE2eeKeyId } : {}),
     createdAtIso: connector.createdAtIso,
     updatedAtIso: connector.updatedAtIso,
     connected: relayAgent?.connected ?? false,
     ...(relayAgent?.lastSeenAtIso ? { lastSeenAtIso: relayAgent.lastSeenAtIso } : {}),
+    ...(options.projectCount !== undefined ? { projectCount: options.projectCount } : {}),
+    ...(options.threadCount !== undefined ? { threadCount: options.threadCount } : {}),
+    ...(options.lastStatsAtIso ? { lastStatsAtIso: options.lastStatsAtIso } : {}),
+    ...(options.statsStale !== undefined ? { statsStale: options.statsStale } : {}),
   }
 }
 
@@ -1053,6 +1268,24 @@ function parseServerResourceId(pathname: string): string | null {
   if (encoded.length === 0 || encoded.includes('/')) return null
   try {
     return decodeURIComponent(encoded).trim()
+  } catch {
+    return null
+  }
+}
+
+function parseConnectorResourceParts(pathname: string): { connectorId: string; action: string | null } | null {
+  const prefix = '/codex-api/connectors/'
+  if (!pathname.startsWith(prefix)) return null
+  const suffix = pathname.slice(prefix.length)
+  if (!suffix || suffix.startsWith('/')) return null
+  const parts = suffix.split('/')
+  if (parts.length === 0 || parts.length > 2) return null
+  try {
+    const connectorId = decodeURIComponent(parts[0]).trim()
+    const action = parts.length === 2 ? decodeURIComponent(parts[1]).trim() : null
+    if (!connectorId) return null
+    if (action !== null && action.length === 0) return null
+    return { connectorId, action }
   } catch {
     return null
   }
@@ -2226,10 +2459,15 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
       const url = new URL(req.url, 'http://localhost')
       const serverResourceId = parseServerResourceId(url.pathname)
+      const connectorResource = parseConnectorResourceParts(url.pathname)
       const registryScope = resolveServerRegistryScope(req)
 
       if (url.pathname.startsWith('/codex-api/servers/') && serverResourceId === null) {
         setJson(res, 400, { error: 'Invalid server resource path' })
+        return
+      }
+      if (url.pathname.startsWith('/codex-api/connectors/') && connectorResource === null) {
+        setJson(res, 400, { error: 'Invalid connector resource path' })
         return
       }
 
@@ -2263,9 +2501,14 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
         await syncRelayHubPersistedAgents(relayHub)
         const registry = await readConnectorRegistryState(registryScope, { persistNormalized: true })
+        const includeStats = ['1', 'true', 'yes'].includes((url.searchParams.get('includeStats') ?? '').trim().toLowerCase())
+        const enriched = await buildConnectorPublicRecords(registry.connectors, registryScope, relayHub, includeStats)
+        if (enriched.changed) {
+          await writeConnectorRegistryState(registryScope, { connectors: enriched.nextRecords })
+        }
         setJson(res, 200, {
           data: {
-            connectors: registry.connectors.map((connector) => toPublicConnectorRecord(connector, relayHub)),
+            connectors: enriched.publicRecords,
           },
         })
         return
@@ -2299,6 +2542,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           setJson(res, 409, { error: `Connector "${connectorId}" already exists` })
           return
         }
+        const serverRegistry = await readServerRegistryState(registryScope, { persistNormalized: true })
+        if (serverRegistry.servers.some((server) => server.id === connectorId)) {
+          setJson(res, 409, { error: `Server "${connectorId}" already exists` })
+          return
+        }
 
         const name = typeof payload.name === 'string' && payload.name.trim().length > 0
           ? payload.name.trim()
@@ -2308,13 +2556,22 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           setJson(res, 400, { error: 'Valid hubAddress is required' })
           return
         }
+        const relayE2ee = payload.e2ee === undefined
+          ? undefined
+          : normalizeRelayE2eeConfig(payload.e2ee)
+        if (payload.e2ee !== undefined && relayE2ee === null) {
+          setJson(res, 400, { error: 'Invalid connector E2EE configuration' })
+          return
+        }
 
         const created = relayHub.createAgent(name)
         const connector: CodexConnectorRecord = {
           id: connectorId,
+          serverId: connectorId,
           name,
           hubAddress,
           relayAgentId: created.agent.id,
+          ...(relayE2ee?.keyId ? { relayE2eeKeyId: relayE2ee.keyId } : {}),
           tokenHash: created.tokenHash,
           createdAtIso: created.agent.createdAtIso,
           updatedAtIso: created.agent.updatedAtIso,
@@ -2323,6 +2580,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           connectors: [...registry.connectors, connector],
         }
         await writeConnectorRegistryState(registryScope, nextState)
+        await upsertConnectorBoundServer(registryScope, connector)
         relayHub.upsertPersistedAgent({
           id: connector.relayAgentId,
           name: connector.name,
@@ -2336,6 +2594,99 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
             token: created.token,
           },
         })
+        return
+      }
+
+      if (connectorResource) {
+        const authenticatedUser = getRequestAuthenticatedUser(req)
+        if (!authenticatedUser) {
+          setJson(res, 401, { error: 'Authentication required' })
+          return
+        }
+
+        const connectorId = connectorResource.connectorId
+        if (!isValidConnectorId(connectorId)) {
+          setJson(res, 400, { error: `Invalid connector id "${connectorId}"` })
+          return
+        }
+
+        const registry = await readConnectorRegistryState(registryScope, { persistNormalized: true })
+        const connectorIndex = registry.connectors.findIndex((connector) => connector.id === connectorId)
+        if (connectorIndex === -1) {
+          setJson(res, 404, { error: `Connector "${connectorId}" not found` })
+          return
+        }
+        const currentConnector = registry.connectors[connectorIndex]
+
+        if (req.method === 'PATCH' && connectorResource.action === null) {
+          const payload = asRecord(await readJsonBody(req))
+          if (!payload) {
+            setJson(res, 400, { error: 'Invalid body: expected object' })
+            return
+          }
+          if ('name' in payload && typeof payload.name !== 'string') {
+            setJson(res, 400, { error: 'Invalid body: "name" must be a string' })
+            return
+          }
+
+          const nextName = typeof payload.name === 'string' && payload.name.trim().length > 0
+            ? payload.name.trim()
+            : currentConnector.name
+          const nextConnector: CodexConnectorRecord = {
+            ...currentConnector,
+            name: nextName,
+            updatedAtIso: new Date().toISOString(),
+          }
+          const nextConnectors = [...registry.connectors]
+          nextConnectors[connectorIndex] = nextConnector
+          await writeConnectorRegistryState(registryScope, { connectors: nextConnectors })
+          relayHub.renameAgent(nextConnector.relayAgentId, nextConnector.name)
+          await upsertConnectorBoundServer(registryScope, nextConnector)
+          setJson(res, 200, {
+            data: {
+              connector: toPublicConnectorRecord(nextConnector, relayHub, {
+                projectCount: nextConnector.lastKnownProjectCount,
+                threadCount: nextConnector.lastKnownThreadCount,
+                lastStatsAtIso: nextConnector.lastStatsAtIso,
+              }),
+            },
+          })
+          return
+        }
+
+        if (req.method === 'DELETE' && connectorResource.action === null) {
+          const nextConnectors = registry.connectors.filter((connector) => connector.id !== connectorId)
+          await writeConnectorRegistryState(registryScope, { connectors: nextConnectors })
+          relayHub.revokeAgent(currentConnector.relayAgentId)
+          await removeConnectorBoundServer(registryScope, currentConnector.serverId, runtimeRegistry)
+          setJson(res, 200, { ok: true, data: { connectors: nextConnectors.map((connector) => toPublicConnectorRecord(connector, relayHub)) } })
+          return
+        }
+
+        if (req.method === 'POST' && connectorResource.action === 'rotate-token') {
+          const rotated = relayHub.rotateAgentToken(currentConnector.relayAgentId)
+          const nextConnector: CodexConnectorRecord = {
+            ...currentConnector,
+            tokenHash: rotated.tokenHash,
+            updatedAtIso: new Date().toISOString(),
+          }
+          const nextConnectors = [...registry.connectors]
+          nextConnectors[connectorIndex] = nextConnector
+          await writeConnectorRegistryState(registryScope, { connectors: nextConnectors })
+          setJson(res, 200, {
+            data: {
+              connector: toPublicConnectorRecord(nextConnector, relayHub, {
+                projectCount: nextConnector.lastKnownProjectCount,
+                threadCount: nextConnector.lastKnownThreadCount,
+                lastStatsAtIso: nextConnector.lastStatsAtIso,
+              }),
+              token: rotated.token,
+            },
+          })
+          return
+        }
+
+        setJson(res, 405, { error: 'Method not allowed' })
         return
       }
 

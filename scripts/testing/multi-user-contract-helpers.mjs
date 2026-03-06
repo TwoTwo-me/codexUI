@@ -228,6 +228,39 @@ export function createMultiUserContractApi() {
     return created
   }
 
+  function upsertConnectorServer(userId, connector) {
+    const registry = getOrCreateRegistry(userId)
+    const existingIndex = registry.servers.findIndex((server) => server.id === connector.serverId)
+    const server = {
+      id: connector.serverId,
+      name: connector.name,
+      transport: 'relay',
+      relay: {
+        agentId: connector.relayAgentId,
+        protocol: DEFAULT_RELAY_PROTOCOL,
+        requestTimeoutMs: DEFAULT_RELAY_TIMEOUT_MS,
+      },
+      createdAtIso: existingIndex >= 0 ? registry.servers[existingIndex].createdAtIso : connector.createdAtIso,
+      updatedAtIso: connector.updatedAtIso,
+    }
+    if (existingIndex >= 0) {
+      registry.servers[existingIndex] = server
+    } else {
+      registry.servers.push(server)
+    }
+    if (!registry.defaultServerId) {
+      registry.defaultServerId = connector.serverId
+    }
+  }
+
+  function removeConnectorServer(userId, serverId) {
+    const registry = getOrCreateRegistry(userId)
+    registry.servers = registry.servers.filter((server) => server.id !== serverId)
+    if (registry.defaultServerId === serverId) {
+      registry.defaultServerId = registry.servers[0]?.id ?? ''
+    }
+  }
+
   async function handleRequest(request) {
     const method = typeof request?.method === 'string' ? request.method.toUpperCase() : 'GET'
     const path = typeof request?.path === 'string' ? request.path : '/'
@@ -348,6 +381,7 @@ export function createMultiUserContractApi() {
       }
 
       const serverMatch = url.pathname.match(/^\/codex-api\/servers\/([^/]+)$/u)
+      const connectorMatch = url.pathname.match(/^\/codex-api\/connectors\/([^/]+)(?:\/([^/]+))?$/u)
 
       if (url.pathname === '/codex-api/servers') {
         const user = resolveSessionUser(request?.headers)
@@ -422,14 +456,21 @@ export function createMultiUserContractApi() {
         }
 
         if (method === 'GET') {
+          const includeStats = ['1', 'true', 'yes'].includes((url.searchParams.get('includeStats') ?? '').trim().toLowerCase())
           const connectors = getConnectorRegistry(user.id).map((connector) => ({
             id: connector.id,
+            serverId: connector.serverId,
             name: connector.name,
             hubAddress: connector.hubAddress,
             relayAgentId: connector.relayAgentId,
+            ...(connector.relayE2eeKeyId ? { relayE2eeKeyId: connector.relayE2eeKeyId } : {}),
             createdAtIso: connector.createdAtIso,
             updatedAtIso: connector.updatedAtIso,
-            connected: false,
+            connected: connector.connected === true,
+            ...(includeStats && connector.lastKnownProjectCount !== undefined ? { projectCount: connector.lastKnownProjectCount } : {}),
+            ...(includeStats && connector.lastKnownThreadCount !== undefined ? { threadCount: connector.lastKnownThreadCount } : {}),
+            ...(includeStats && connector.lastStatsAtIso ? { lastStatsAtIso: connector.lastStatsAtIso } : {}),
+            ...(includeStats ? { statsStale: connector.connected === true ? false : connector.lastStatsAtIso !== undefined } : {}),
           }))
           return jsonResponse(200, { data: { connectors } })
         }
@@ -463,20 +504,31 @@ export function createMultiUserContractApi() {
           const token = `connector-token-${randomBytes(12).toString('hex')}`
           const connector = {
             id: connectorId,
+            serverId: connectorId,
             name,
             hubAddress,
             relayAgentId: `agent-${String(nextConnectorNumber)}`,
             createdAtIso: nowIso,
             updatedAtIso: nowIso,
             tokenHash: hashSecret(token),
+            connected: payload.mockStatus?.connected === true,
+            lastKnownProjectCount: Number.isFinite(Number(payload.mockStatus?.projectCount))
+              ? Math.max(0, Math.trunc(Number(payload.mockStatus.projectCount)))
+              : undefined,
+            lastKnownThreadCount: Number.isFinite(Number(payload.mockStatus?.threadCount))
+              ? Math.max(0, Math.trunc(Number(payload.mockStatus.threadCount)))
+              : undefined,
+            lastStatsAtIso: payload.mockStatus ? nowIso : undefined,
           }
           nextConnectorNumber += 1
           connectors.push(connector)
+          upsertConnectorServer(user.id, connector)
 
           return jsonResponse(201, {
             data: {
               connector: {
                 id: connector.id,
+                serverId: connector.serverId,
                 name: connector.name,
                 hubAddress: connector.hubAddress,
                 relayAgentId: connector.relayAgentId,
@@ -485,6 +537,102 @@ export function createMultiUserContractApi() {
                 connected: false,
               },
               token,
+            },
+          })
+        }
+
+        return jsonResponse(405, { error: 'Method not allowed' })
+      }
+
+      if (connectorMatch) {
+        const user = resolveSessionUser(request?.headers)
+        if (!user) {
+          return jsonResponse(401, { error: 'Unauthorized' })
+        }
+        const connectorId = connectorMatch[1]
+        const action = connectorMatch[2] ?? null
+        if (!CONNECTOR_ID_PATTERN.test(connectorId)) {
+          return jsonResponse(400, { error: `Invalid connector id "${connectorId}"` })
+        }
+        const connectors = getConnectorRegistry(user.id)
+        const connectorIndex = connectors.findIndex((connector) => connector.id === connectorId)
+        if (connectorIndex === -1) {
+          return jsonResponse(404, { error: `Connector "${connectorId}" not found` })
+        }
+        const current = connectors[connectorIndex]
+
+        if (method === 'PATCH' && action === null) {
+          const payload = parseJsonBody(request?.body)
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            return jsonResponse(400, { error: 'Invalid body: expected object' })
+          }
+          if ('name' in payload && typeof payload.name !== 'string') {
+            return jsonResponse(400, { error: 'Invalid body: "name" must be a string' })
+          }
+          const next = {
+            ...current,
+            name: typeof payload.name === 'string' && payload.name.trim().length > 0 ? payload.name.trim() : current.name,
+            updatedAtIso: new Date().toISOString(),
+          }
+          connectors[connectorIndex] = next
+          upsertConnectorServer(user.id, next)
+          return jsonResponse(200, {
+            data: {
+              connector: {
+                id: next.id,
+                serverId: next.serverId,
+                name: next.name,
+                hubAddress: next.hubAddress,
+                relayAgentId: next.relayAgentId,
+                createdAtIso: next.createdAtIso,
+                updatedAtIso: next.updatedAtIso,
+                connected: false,
+              },
+            },
+          })
+        }
+
+        if (method === 'POST' && action === 'rotate-token') {
+          const token = `connector-token-${randomBytes(12).toString('hex')}`
+          const next = {
+            ...current,
+            tokenHash: hashSecret(token),
+            updatedAtIso: new Date().toISOString(),
+          }
+          connectors[connectorIndex] = next
+          return jsonResponse(200, {
+            data: {
+              connector: {
+                id: next.id,
+                serverId: next.serverId,
+                name: next.name,
+                hubAddress: next.hubAddress,
+                relayAgentId: next.relayAgentId,
+                createdAtIso: next.createdAtIso,
+                updatedAtIso: next.updatedAtIso,
+                connected: false,
+              },
+              token,
+            },
+          })
+        }
+
+        if (method === 'DELETE' && action === null) {
+          connectors.splice(connectorIndex, 1)
+          removeConnectorServer(user.id, current.serverId)
+          return jsonResponse(200, {
+            ok: true,
+            data: {
+              connectors: connectors.map((connector) => ({
+                id: connector.id,
+                serverId: connector.serverId,
+                name: connector.name,
+                hubAddress: connector.hubAddress,
+                relayAgentId: connector.relayAgentId,
+                createdAtIso: connector.createdAtIso,
+                updatedAtIso: connector.updatedAtIso,
+                connected: false,
+              })),
             },
           })
         }

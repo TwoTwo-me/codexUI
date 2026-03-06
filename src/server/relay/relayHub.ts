@@ -201,6 +201,57 @@ export class OutboundRelayHub {
     }
   }
 
+  renameAgent(agentId: string, name: string): RelayAgentPublicRecord {
+    const agent = this.agentsById.get(agentId)
+    if (!agent) {
+      throw new RelayHubError('relay_agent_not_found', `Relay agent "${agentId}" not found`, 404)
+    }
+    const normalizedName = name.trim()
+    if (!normalizedName) {
+      throw new RelayHubError('relay_agent_invalid_name', 'Relay agent name is required', 400)
+    }
+    agent.name = normalizedName
+    agent.updatedAtIso = new Date().toISOString()
+    return toPublicAgentRecord(agent, this.sessionIdByAgentId.has(agentId))
+  }
+
+  rotateAgentToken(agentId: string): { agent: RelayAgentPublicRecord; token: string; tokenHash: string } {
+    const agent = this.agentsById.get(agentId)
+    if (!agent) {
+      throw new RelayHubError('relay_agent_not_found', `Relay agent "${agentId}" not found`, 404)
+    }
+
+    const token = createSecretToken()
+    const tokenHash = hashToken(token)
+    agent.tokenHash = tokenHash
+    agent.updatedAtIso = new Date().toISOString()
+
+    const sessionId = this.sessionIdByAgentId.get(agentId)
+    if (sessionId) {
+      this.disposeSession(sessionId)
+    }
+
+    return {
+      agent: toPublicAgentRecord(agent, false),
+      token,
+      tokenHash,
+    }
+  }
+
+  revokeAgent(agentId: string): void {
+    const agent = this.agentsById.get(agentId)
+    if (!agent) {
+      return
+    }
+    const sessionId = this.sessionIdByAgentId.get(agentId)
+    if (sessionId) {
+      this.disposeSession(sessionId)
+    }
+    this.allowedRoutesByAgentId.delete(agentId)
+    this.rejectPendingRpcByAgent(agentId)
+    this.agentsById.delete(agentId)
+  }
+
   connectWithToken(token: string): { sessionId: string; pollTimeoutMs: number; agent: RelayAgentPublicRecord } {
     const { agent: matchedAgent, tokenHash } = this.resolveAgentByToken(token)
 
