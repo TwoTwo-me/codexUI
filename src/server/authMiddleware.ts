@@ -261,7 +261,18 @@ function toRole(value: unknown): UserRole {
   return value === 'admin' ? 'admin' : 'user'
 }
 
-const LOGIN_PAGE_HTML = `<!DOCTYPE html>
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;')
+    .replace(/'/gu, '&#39;')
+}
+
+function renderLoginPage(bootstrapAdminUsername: string): string {
+  const escapedUsername = escapeHtml(bootstrapAdminUsername)
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -288,14 +299,14 @@ button:hover{background:#2563eb}
 <form id="f">
 <div class="field">
 <label for="username">Username</label>
-<input id="username" name="username" autocomplete="username" placeholder="admin">
+<input id="username" name="username" autocomplete="username" placeholder="${escapedUsername}">
 </div>
 <div class="field">
 <label for="pw">Password</label>
 <input id="pw" name="password" type="password" autocomplete="current-password" autofocus required>
 </div>
 <button type="submit">Sign in</button>
-<p class="hint">Leave username blank to use admin login compatibility mode.</p>
+<p class="hint">Leave username blank to use ${escapedUsername} login compatibility mode.</p>
 <p class="error" id="err">Invalid credentials</p>
 </form>
 </div>
@@ -315,6 +326,7 @@ form.addEventListener('submit',async e=>{
 </script>
 </body>
 </html>`
+}
 
 export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareOptions): RequestHandler {
   const options: AuthMiddlewareOptions = typeof passwordOrOptions === 'string'
@@ -594,7 +606,7 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
     }
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8')
-    res.status(200).send(LOGIN_PAGE_HTML)
+    res.status(200).send(renderLoginPage(bootstrapAdminUsername))
   }
 
   return (req: Request, res: Response, next: NextFunction): void => {

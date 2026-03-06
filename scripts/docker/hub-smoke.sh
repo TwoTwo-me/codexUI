@@ -2,21 +2,81 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-COMPOSE_FILE="$ROOT_DIR/docker-compose.yml"
-PORT="${CODEXUI_PORT:-4300}"
+cd "$ROOT_DIR"
 
-docker compose -f "$COMPOSE_FILE" ps hub >/dev/null
-docker compose -f "$COMPOSE_FILE" exec -T hub sh -lc 'test -s /data/codex-home/auth.json'
-docker compose -f "$COMPOSE_FILE" exec -T hub codex --version >/dev/null
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  while IFS='=' read -r key value; do
+    [[ -z "$key" || "$key" =~ ^# ]] && continue
+    if [[ -z "${!key+x}" ]]; then
+      export "$key=$value"
+    fi
+  done < "$ROOT_DIR/.env"
+fi
 
-node -e "
-const port = Number(process.argv[1] || '4300')
-fetch(\`http://127.0.0.1:\${port}/auth/session\`, { headers: { Accept: 'application/json' } })
-  .then((response) => {
-    if (!response.ok) process.exit(1)
-    process.exit(0)
+LOCAL_SMOKE_HOST="${CODEXUI_SMOKE_HOST:-127.0.0.1}"
+LOCAL_SMOKE_PORT="${CODEXUI_HOST_PORT:-${CODEXUI_PORT:-4300}}"
+BASE_URL="${BASE_URL:-http://${LOCAL_SMOKE_HOST}:${LOCAL_SMOKE_PORT}}"
+ADMIN_USERNAME="${CODEXUI_ADMIN_USERNAME:-admin}"
+ADMIN_PASSWORD="${CODEXUI_ADMIN_PASSWORD:-}"
+export BASE_URL ADMIN_USERNAME ADMIN_PASSWORD
+
+if [[ -z "$ADMIN_PASSWORD" ]]; then
+  echo "[hub-smoke] CODEXUI_ADMIN_PASSWORD must be set in the environment or .env" >&2
+  exit 1
+fi
+
+docker compose ps hub >/dev/null
+docker compose exec -T hub sh -lc 'test -s /data/codex-home/auth.json'
+docker compose exec -T hub codex --version >/dev/null
+
+node <<'EOF_NODE'
+const baseUrl = process.env.BASE_URL
+const username = process.env.ADMIN_USERNAME
+const password = process.env.ADMIN_PASSWORD
+
+async function waitForHealthy() {
+  const deadline = Date.now() + 60_000
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${baseUrl}/auth/session`)
+      if (response.ok) return
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+  }
+  throw new Error(`Hub did not become ready in time: ${baseUrl}`)
+}
+
+async function main() {
+  await waitForHealthy()
+  const login = await fetch(`${baseUrl}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ username, password }),
   })
-  .catch(() => process.exit(1))
-" "$PORT"
+  if (!login.ok) {
+    throw new Error(`Login failed (${login.status}): ${await login.text()}`)
+  }
+  const cookie = login.headers.get('set-cookie') || ''
+  if (!cookie.includes('codex_web_local_token=')) {
+    throw new Error('Login response did not include a session cookie')
+  }
+  const session = await fetch(`${baseUrl}/auth/session`, {
+    headers: { cookie: cookie.split(';', 1)[0] },
+  })
+  if (!session.ok) {
+    throw new Error(`Session lookup failed (${session.status})`)
+  }
+  const payload = await session.json()
+  if (!payload?.authenticated || payload?.user?.username !== username) {
+    throw new Error(`Unexpected session payload: ${JSON.stringify(payload)}`)
+  }
+  console.log(`[hub-smoke] Authenticated as ${payload.user.username} via ${baseUrl}`)
+}
 
-echo "[docker:hub:smoke] Hub container is healthy on http://127.0.0.1:${PORT}"
+main().catch((error) => {
+  console.error(`[hub-smoke] ${error instanceof Error ? error.message : String(error)}`)
+  process.exit(1)
+})
+EOF_NODE
+
+echo "[hub-smoke] Container has codex auth + CLI and authenticated successfully"

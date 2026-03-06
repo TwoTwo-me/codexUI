@@ -60,6 +60,11 @@ function hasCodexAuth(): boolean {
   return existsSync(join(codexHome, 'auth.json'))
 }
 
+function shouldSkipCodexLogin(): boolean {
+  const raw = process.env.CODEXUI_SKIP_CODEX_LOGIN?.trim().toLowerCase()
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on'
+}
+
 function ensureTermuxCodexInstalled(): string | null {
   if (!isTermuxRuntime()) {
     return resolveCodexCommand()
@@ -91,6 +96,32 @@ function resolvePassword(input: string | boolean): string | undefined {
     return input
   }
   return generatePassword()
+}
+
+function resolveBootstrapAdminUsername(input?: string): string {
+  const provided = input?.trim()
+  if (provided && provided.length > 0) {
+    return provided
+  }
+  const envUsername = process.env.CODEXUI_ADMIN_USERNAME?.trim()
+  if (envUsername && envUsername.length > 0) {
+    return envUsername
+  }
+  return 'admin'
+}
+
+function shouldOpenBrowser(): boolean {
+  const envValue = process.env.CODEXUI_OPEN_BROWSER?.trim().toLowerCase()
+  if (!envValue) {
+    return true
+  }
+  if (['0', 'false', 'no', 'off'].includes(envValue)) {
+    return false
+  }
+  if (['1', 'true', 'yes', 'on'].includes(envValue)) {
+    return true
+  }
+  return true
 }
 
 function printTermuxKeepAlive(lines: string[]): void {
@@ -154,17 +185,22 @@ function listenWithFallback(server: ReturnType<typeof createServer>, startPort: 
   })
 }
 
-async function startServer(options: { port: string; host?: string; password: string | boolean }) {
+async function startServer(options: { port: string; host?: string; password: string | boolean; username?: string }) {
   const version = await readCliVersion()
   const codexCommand = ensureTermuxCodexInstalled() ?? resolveCodexCommand()
   if (!hasCodexAuth() && codexCommand) {
-    console.log('\nCodex is not logged in. Starting `codex login`...\n')
-    runOrFail(codexCommand, ['login'], 'Codex login')
+    if (shouldSkipCodexLogin()) {
+      console.log('\nCodex auth not found. Skipping `codex login` because CODEXUI_SKIP_CODEX_LOGIN is enabled.\n')
+    } else {
+      console.log('\nCodex is not logged in. Starting `codex login`...\n')
+      runOrFail(codexCommand, ['login'], 'Codex login')
+    }
   }
   const requestedPort = parseInt(options.port, 10)
   const host = resolveBindHost(options.host)
   const password = resolvePassword(options.password)
-  const { app, dispose } = createApp({ password })
+  const bootstrapAdminUsername = resolveBootstrapAdminUsername(options.username)
+  const { app, dispose } = createApp({ password, bootstrapAdminUsername })
   const server = createServer(app)
   const port = await listenWithFallback(server, requestedPort, host)
   const localUrl = getPrimaryLocalUrl(host, port)
@@ -181,7 +217,7 @@ async function startServer(options: { port: string; host?: string; password: str
   }
 
   if (password) {
-    lines.push('  Username: admin')
+    lines.push(`  Username: ${bootstrapAdminUsername}`)
     lines.push(`  Password: ${password}`)
   }
 
@@ -193,7 +229,9 @@ async function startServer(options: { port: string; host?: string; password: str
 
   lines.push('')
   console.log(lines.join('\n'))
-  openBrowser(localUrl)
+  if (shouldOpenBrowser()) {
+    openBrowser(localUrl)
+  }
 
   function shutdown() {
     console.log('\nShutting down...')
@@ -219,11 +257,12 @@ async function runLogin() {
 }
 
 program
-  .option('-p, --port <port>', 'port to listen on', '3000')
+  .option('-p, --port <port>', 'port to listen on', process.env.CODEXUI_PORT?.trim() || '3000')
   .option('--host <host>', 'host/interface to bind (default: 127.0.0.1 or CODEXUI_BIND_HOST)')
+  .option('--username <username>', 'bootstrap admin username (default: admin or CODEXUI_ADMIN_USERNAME)')
   .option('--password <pass>', 'set a specific password')
   .option('--no-password', 'disable password protection')
-  .action(async (opts: { port: string; host?: string; password: string | boolean }) => {
+  .action(async (opts: { port: string; host?: string; username?: string; password: string | boolean }) => {
     await startServer(opts)
   })
 

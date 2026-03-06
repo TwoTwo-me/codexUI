@@ -1,4 +1,4 @@
-name: codexui-hub
+name: ${COMPOSE_PROJECT_NAME:-codexui-hub}
 
 services:
   hub:
@@ -9,25 +9,35 @@ services:
       dockerfile: Dockerfile
       args:
         CODEX_CLI_VERSION: ${CODEXUI_CODEX_CLI_VERSION:-0.110.0}
-    restart: ${CODEXUI_RESTART_POLICY:-unless-stopped}
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      HOME: /data
       CODEX_HOME: /data/codex-home
       CODEXUI_BIND_HOST: ${CODEXUI_BIND_HOST:-0.0.0.0}
       CODEXUI_PORT: ${CODEXUI_PORT:-4300}
-      CODEXUI_PASSWORD_MODE: ${CODEXUI_PASSWORD_MODE:-required}
-      CODEXUI_PASSWORD: ${CODEXUI_PASSWORD:-admin}
+      CODEXUI_ADMIN_USERNAME: ${CODEXUI_ADMIN_USERNAME:-admin}
+      CODEXUI_ADMIN_PASSWORD: ${CODEXUI_ADMIN_PASSWORD:-change-me-now}
+      CODEXUI_ADMIN_PASSWORD_FILE: ${CODEXUI_ADMIN_PASSWORD_FILE:-}
+      CODEXUI_SKIP_CODEX_LOGIN: ${CODEXUI_SKIP_CODEX_LOGIN:-true}
+      CODEXUI_OPEN_BROWSER: ${CODEXUI_OPEN_BROWSER:-false}
     ports:
-      - "${CODEXUI_PORT:-4300}:${CODEXUI_PORT:-4300}"
+      - "${CODEXUI_EXPOSE_HOST:-0.0.0.0}:${CODEXUI_HOST_PORT:-4300}:${CODEXUI_PORT:-4300}"
     volumes:
-      - ${CODEXUI_DATA_DIR:-./docker/data}:/data
-      - ${CODEXUI_CODEX_AUTH_FILE:-./docker/secrets/codex-auth.json}:/data/codex-home/auth.json:ro
+      - ${CODEXUI_DATA_DIR:-./.data/hub}:/data
+      - ${CODEXUI_WORKSPACE_DIR:-./workspace}:/workspace
+      - ${CODEXUI_CODEX_HOME_DIR:-./docker/local-codex}:/data/codex-home
     healthcheck:
       test:
         [
-          "CMD-SHELL",
-          "node -e \"fetch('http://127.0.0.1:' + (process.env.CODEXUI_PORT || '4300') + '/auth/session', { headers: { Accept: 'application/json' } }).then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))\"",
+          "CMD",
+          "node",
+          "-e",
+          "const port=process.env.CODEXUI_PORT||'4300';fetch('http://127.0.0.1:' + port + '/auth/session').then((res)=>process.exit(res.ok?0:1)).catch(()=>process.exit(1));",
         ]
       interval: 15s
       timeout: 5s
       retries: 10
-      start_period: 15s
+      start_period: 20s

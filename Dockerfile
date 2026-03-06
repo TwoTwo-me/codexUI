@@ -1,46 +1,44 @@
-FROM node:20-bookworm-slim AS builder
-
 ARG CODEX_CLI_VERSION=0.110.0
 
+FROM node:20-bookworm-slim AS build
 WORKDIR /app
 
-COPY package.json package-lock.json ./
+COPY package*.json ./
 RUN npm ci
 
 COPY . .
-RUN npm run build
+RUN npm run build \
+  && npm prune --omit=dev
 
-
-FROM node:20-bookworm-slim AS runner
-
+FROM node:20-bookworm-slim AS runtime
 ARG CODEX_CLI_VERSION=0.110.0
+WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates tini bash \
-  && rm -rf /var/lib/apt/lists/*
-
-RUN npm install --global @openai/codex@${CODEX_CLI_VERSION} \
+  && apt-get install -y --no-install-recommends ca-certificates curl git python3 ripgrep tini \
+  && rm -rf /var/lib/apt/lists/* \
+  && npm install --global @openai/codex@${CODEX_CLI_VERSION} \
   && npm cache clean --force
 
 ENV NODE_ENV=production \
-  CODEX_HOME=/data/codex-home \
-  CODEXUI_BIND_HOST=0.0.0.0 \
-  CODEXUI_PORT=4300 \
-  CODEXUI_PASSWORD_MODE=required
+    HOME=/data \
+    CODEX_HOME=/data/codex-home \
+    CODEXUI_BIND_HOST=0.0.0.0 \
+    CODEXUI_PORT=4300 \
+    CODEXUI_ADMIN_USERNAME=admin \
+    CODEXUI_SKIP_CODEX_LOGIN=true \
+    CODEXUI_OPEN_BROWSER=false
 
-WORKDIR /app
+COPY --from=build /app/package*.json ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/dist-cli ./dist-cli
+COPY docker/hub/entrypoint.sh /usr/local/bin/codexui-entrypoint
 
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts
-
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/dist-cli ./dist-cli
-COPY docker/hub/start-hub.sh /usr/local/bin/start-codexui-hub
-
-RUN chmod +x /usr/local/bin/start-codexui-hub \
-  && mkdir -p /data/codex-home
+RUN chmod +x /usr/local/bin/codexui-entrypoint \
+  && mkdir -p /data/codex-home /workspace
 
 EXPOSE 4300
+VOLUME ["/data", "/workspace"]
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["start-codexui-hub"]
+ENTRYPOINT ["/usr/bin/tini", "--", "codexui-entrypoint"]

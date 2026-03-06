@@ -6,3 +6,8 @@ output/
 test-results/
 playwright-report/
 .artifacts/
+.data/
+workspace/*
+!workspace/.gitignore
+docker/local-codex/*
+!docker/local-codex/.gitignore

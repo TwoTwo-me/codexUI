@@ -40,15 +40,17 @@
     "prepublishOnly": "npm run build",
     "test:multi-server": "npm run build:cli && node --test tests/multi-server",
     "test:playwright:admin": "playwright test tests/playwright/phase2-admin-ui.spec.ts",
+    "docker:hub:build": "docker compose --project-directory . -f docker-compose.yml build hub",
+    "docker:hub:prepare-auth": "bash scripts/docker/hub-prepare-codex-auth.sh",
+    "docker:hub:up": "bash scripts/docker/hub-up.sh",
+    "docker:hub:down": "bash scripts/docker/hub-down.sh",
+    "docker:hub:logs": "bash scripts/docker/hub-logs.sh",
+    "docker:hub:smoke": "bash scripts/docker/hub-smoke.sh",
+    "docker:hub:register-local": "bash scripts/docker/hub-register-local-server.sh",
     "docker:multi-server:prepare-auth": "bash scripts/docker/prepare-codex-auth.sh",
     "docker:multi-server:up": "bash scripts/docker/multi-server-up.sh",
     "docker:multi-server:smoke": "bash scripts/docker/multi-server-smoke.sh",
-    "docker:multi-server:down": "bash scripts/docker/multi-server-down.sh",
-    "docker:hub:build": "docker compose build hub",
-    "docker:hub:up": "docker compose up --build -d hub",
-    "docker:hub:down": "docker compose down --remove-orphans",
-    "docker:hub:logs": "docker compose logs -f hub",
-    "docker:hub:smoke": "bash scripts/docker/hub-smoke.sh"
+    "docker:multi-server:down": "bash scripts/docker/multi-server-down.sh"
   },
   "dependencies": {
     "commander": "^13.1.0",
