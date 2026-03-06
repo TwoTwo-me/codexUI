@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { mkdtemp, readFile, readdir, rm, mkdir, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { request as httpsRequest } from 'node:https'
@@ -104,7 +104,12 @@ type CodexConnectorRecord = {
   hubAddress: string
   relayAgentId: string
   relayE2eeKeyId?: string
-  tokenHash: string
+  credentialHash?: string
+  credentialIssuedAtIso?: string
+  bootstrapTokenHash?: string
+  bootstrapIssuedAtIso?: string
+  bootstrapExpiresAtIso?: string
+  bootstrapConsumedAtIso?: string
   lastKnownProjectCount?: number
   lastKnownThreadCount?: number
   lastStatsAtIso?: string
@@ -121,6 +126,11 @@ type CodexConnectorPublicRecord = {
   relayE2eeKeyId?: string
   createdAtIso: string
   updatedAtIso: string
+  installState: 'pending_install' | 'connected' | 'offline' | 'expired_bootstrap' | 'reinstall_required'
+  bootstrapIssuedAtIso?: string
+  bootstrapExpiresAtIso?: string
+  bootstrapConsumedAtIso?: string
+  credentialIssuedAtIso?: string
   connected: boolean
   lastSeenAtIso?: string
   projectCount?: number
@@ -521,6 +531,7 @@ const RELAY_AGENT_RATE_LIMIT_BLOCK_MS = 60_000
 const RELAY_AGENT_RATE_LIMIT_MAX_PER_IP = 4_000
 const RELAY_AGENT_RATE_LIMIT_MAX_PER_CLIENT_KEY = 480
 const RELAY_AGENT_RATE_LIMIT_MAX_ENTRIES = 4096
+const CONNECTOR_BOOTSTRAP_TTL_MS = 15 * 60_000
 const cachedServerRegistryStateByScope = new Map<string, ServerRegistryState>()
 const cachedConnectorRegistryStateByScope = new Map<string, ConnectorRegistryState>()
 
@@ -726,8 +737,11 @@ function normalizeConnectorRecord(value: unknown, nowIso: string): CodexConnecto
     return null
   }
 
-  const tokenHash = typeof record.tokenHash === 'string' ? record.tokenHash.trim() : ''
-  if (!tokenHash) {
+  const credentialHash = typeof record.credentialHash === 'string' ? record.credentialHash.trim() : ''
+  const legacyTokenHash = typeof record.tokenHash === 'string' ? record.tokenHash.trim() : ''
+  const resolvedCredentialHash = credentialHash || legacyTokenHash
+  const bootstrapTokenHash = typeof record.bootstrapTokenHash === 'string' ? record.bootstrapTokenHash.trim() : ''
+  if (!resolvedCredentialHash && !bootstrapTokenHash) {
     return null
   }
 
@@ -756,6 +770,18 @@ function normalizeConnectorRecord(value: unknown, nowIso: string): CodexConnecto
   const lastKnownThreadCount = typeof record.lastKnownThreadCount === 'number' && Number.isFinite(record.lastKnownThreadCount)
     ? Math.max(0, Math.trunc(record.lastKnownThreadCount))
     : undefined
+  const credentialIssuedAtIso = typeof record.credentialIssuedAtIso === 'string' && record.credentialIssuedAtIso.trim().length > 0
+    ? record.credentialIssuedAtIso.trim()
+    : (resolvedCredentialHash ? nowIso : undefined)
+  const bootstrapIssuedAtIso = typeof record.bootstrapIssuedAtIso === 'string' && record.bootstrapIssuedAtIso.trim().length > 0
+    ? record.bootstrapIssuedAtIso.trim()
+    : undefined
+  const bootstrapExpiresAtIso = typeof record.bootstrapExpiresAtIso === 'string' && record.bootstrapExpiresAtIso.trim().length > 0
+    ? record.bootstrapExpiresAtIso.trim()
+    : undefined
+  const bootstrapConsumedAtIso = typeof record.bootstrapConsumedAtIso === 'string' && record.bootstrapConsumedAtIso.trim().length > 0
+    ? record.bootstrapConsumedAtIso.trim()
+    : undefined
   const lastStatsAtIso = typeof record.lastStatsAtIso === 'string' && record.lastStatsAtIso.trim().length > 0
     ? record.lastStatsAtIso.trim()
     : undefined
@@ -773,7 +799,12 @@ function normalizeConnectorRecord(value: unknown, nowIso: string): CodexConnecto
     hubAddress,
     relayAgentId,
     ...(relayE2eeKeyId ? { relayE2eeKeyId } : {}),
-    tokenHash,
+    ...(resolvedCredentialHash ? { credentialHash: resolvedCredentialHash } : {}),
+    ...(credentialIssuedAtIso ? { credentialIssuedAtIso } : {}),
+    ...(bootstrapTokenHash ? { bootstrapTokenHash } : {}),
+    ...(bootstrapIssuedAtIso ? { bootstrapIssuedAtIso } : {}),
+    ...(bootstrapExpiresAtIso ? { bootstrapExpiresAtIso } : {}),
+    ...(bootstrapConsumedAtIso ? { bootstrapConsumedAtIso } : {}),
     ...(lastKnownProjectCount !== undefined ? { lastKnownProjectCount } : {}),
     ...(lastKnownThreadCount !== undefined ? { lastKnownThreadCount } : {}),
     ...(lastStatsAtIso ? { lastStatsAtIso } : {}),
@@ -995,6 +1026,103 @@ function listPersistedConnectorRecords(payload: Record<string, unknown>): CodexC
   return Array.from(recordsById.values())
 }
 
+function createConnectorSecretToken(): string {
+  return randomBytes(32).toString('base64url')
+}
+
+function hashConnectorSecret(token: string): string {
+  return createHash('sha256').update(token).digest('hex')
+}
+
+function getBootstrapExpiryIso(
+  issuedAtIso: string,
+  ttlMs = CONNECTOR_BOOTSTRAP_TTL_MS,
+): string {
+  return new Date(new Date(issuedAtIso).valueOf() + ttlMs).toISOString()
+}
+
+function isBootstrapExpired(connector: Pick<CodexConnectorRecord, 'bootstrapTokenHash' | 'bootstrapExpiresAtIso'>, nowMs = Date.now()): boolean {
+  if (!connector.bootstrapTokenHash || !connector.bootstrapExpiresAtIso) {
+    return false
+  }
+  const expiresAtMs = Date.parse(connector.bootstrapExpiresAtIso)
+  return Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs
+}
+
+function deriveConnectorInstallState(
+  connector: Pick<
+    CodexConnectorRecord,
+    'credentialHash' | 'credentialIssuedAtIso' | 'bootstrapTokenHash' | 'bootstrapExpiresAtIso' | 'bootstrapConsumedAtIso'
+  >,
+  connected: boolean,
+  nowMs = Date.now(),
+): CodexConnectorPublicRecord['installState'] {
+  if (connector.credentialHash) {
+    return connected ? 'connected' : 'offline'
+  }
+
+  if (connector.bootstrapTokenHash) {
+    if (isBootstrapExpired(connector, nowMs)) {
+      return 'expired_bootstrap'
+    }
+    return connector.bootstrapConsumedAtIso || connector.credentialIssuedAtIso
+      ? 'reinstall_required'
+      : 'pending_install'
+  }
+
+  return connector.bootstrapConsumedAtIso || connector.credentialIssuedAtIso
+    ? 'reinstall_required'
+    : 'pending_install'
+}
+
+type ConnectorRegistryLookup = {
+  scope: ServerRegistryScope
+  state: ConnectorRegistryState
+  connector: CodexConnectorRecord
+  index: number
+}
+
+async function findConnectorByBootstrapToken(
+  connectorId: string,
+  token: string,
+): Promise<ConnectorRegistryLookup | null> {
+  const normalizedToken = token.trim()
+  if (!normalizedToken) return null
+  const hashedToken = hashConnectorSecret(normalizedToken)
+  const payload = await readCodexGlobalStatePayload()
+  const nowIso = new Date().toISOString()
+
+  const globalRegistry = normalizeConnectorRegistryState(payload[CONNECTOR_REGISTRY_STATE_KEY], nowIso)
+  const globalIndex = globalRegistry.connectors.findIndex((connector) => {
+    return connector.id === connectorId && connector.bootstrapTokenHash === hashedToken
+  })
+  if (globalIndex >= 0) {
+    return {
+      scope: { cacheKey: 'global', userId: null },
+      state: globalRegistry,
+      connector: globalRegistry.connectors[globalIndex],
+      index: globalIndex,
+    }
+  }
+
+  const perUserPayload = asRecord(payload[CONNECTOR_REGISTRY_STATE_BY_USER_KEY]) ?? {}
+  for (const [userId, rawRegistry] of Object.entries(perUserPayload)) {
+    const registry = normalizeConnectorRegistryState(rawRegistry, nowIso)
+    const connectorIndex = registry.connectors.findIndex((connector) => {
+      return connector.id === connectorId && connector.bootstrapTokenHash === hashedToken
+    })
+    if (connectorIndex === -1) continue
+    return {
+      scope: { cacheKey: `user:${userId}`, userId },
+      state: registry,
+      connector: registry.connectors[connectorIndex],
+      index: connectorIndex,
+    }
+  }
+
+  return null
+}
+
 function buildServerIdSeed(value: string): string {
   const lowered = value.toLowerCase().trim()
   const collapsed = lowered
@@ -1213,6 +1341,7 @@ function toPublicConnectorRecord(
   } = {},
 ): CodexConnectorPublicRecord {
   const relayAgent = relayHub.getAgent(connector.relayAgentId)
+  const connected = relayAgent?.connected ?? false
   return {
     id: connector.id,
     serverId: connector.serverId,
@@ -1222,7 +1351,12 @@ function toPublicConnectorRecord(
     ...(connector.relayE2eeKeyId ? { relayE2eeKeyId: connector.relayE2eeKeyId } : {}),
     createdAtIso: connector.createdAtIso,
     updatedAtIso: connector.updatedAtIso,
-    connected: relayAgent?.connected ?? false,
+    installState: deriveConnectorInstallState(connector, connected),
+    ...(connector.bootstrapIssuedAtIso ? { bootstrapIssuedAtIso: connector.bootstrapIssuedAtIso } : {}),
+    ...(connector.bootstrapExpiresAtIso ? { bootstrapExpiresAtIso: connector.bootstrapExpiresAtIso } : {}),
+    ...(connector.bootstrapConsumedAtIso ? { bootstrapConsumedAtIso: connector.bootstrapConsumedAtIso } : {}),
+    ...(connector.credentialIssuedAtIso ? { credentialIssuedAtIso: connector.credentialIssuedAtIso } : {}),
+    connected,
     ...(relayAgent?.lastSeenAtIso ? { lastSeenAtIso: relayAgent.lastSeenAtIso } : {}),
     ...(options.projectCount !== undefined ? { projectCount: options.projectCount } : {}),
     ...(options.threadCount !== undefined ? { threadCount: options.threadCount } : {}),
@@ -1237,7 +1371,7 @@ async function syncRelayHubPersistedAgents(relayHub: OutboundRelayHub): Promise<
     relayHub.upsertPersistedAgent({
       id: connector.relayAgentId,
       name: connector.name,
-      tokenHash: connector.tokenHash,
+      ...(connector.credentialHash ? { tokenHash: connector.credentialHash } : {}),
       createdAtIso: connector.createdAtIso,
       updatedAtIso: connector.updatedAtIso,
     })
@@ -2548,7 +2682,12 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           return
         }
 
-        const created = relayHub.createAgent(name)
+        const created = relayHub.createAgent(name, { issueToken: false })
+        const bootstrapIssuedAtIso = created.agent.createdAtIso
+        const requestedBootstrapTtlMs = typeof payload.bootstrapTtlMs === 'number' && Number.isFinite(payload.bootstrapTtlMs)
+          ? Math.trunc(payload.bootstrapTtlMs)
+          : CONNECTOR_BOOTSTRAP_TTL_MS
+        const bootstrapToken = createConnectorSecretToken()
         const connector: CodexConnectorRecord = {
           id: connectorId,
           serverId: connectorId,
@@ -2556,9 +2695,11 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           hubAddress,
           relayAgentId: created.agent.id,
           ...(relayE2ee?.keyId ? { relayE2eeKeyId: relayE2ee.keyId } : {}),
-          tokenHash: created.tokenHash,
           createdAtIso: created.agent.createdAtIso,
           updatedAtIso: created.agent.updatedAtIso,
+          bootstrapTokenHash: hashConnectorSecret(bootstrapToken),
+          bootstrapIssuedAtIso,
+          bootstrapExpiresAtIso: getBootstrapExpiryIso(bootstrapIssuedAtIso, requestedBootstrapTtlMs),
         }
         const nextState: ConnectorRegistryState = {
           connectors: [...registry.connectors, connector],
@@ -2568,29 +2709,84 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         relayHub.upsertPersistedAgent({
           id: connector.relayAgentId,
           name: connector.name,
-          tokenHash: connector.tokenHash,
           createdAtIso: connector.createdAtIso,
           updatedAtIso: connector.updatedAtIso,
         })
         setJson(res, 201, {
           data: {
             connector: toPublicConnectorRecord(connector, relayHub),
-            token: created.token,
+            bootstrapToken,
           },
         })
         return
       }
 
       if (connectorResource) {
-        const authenticatedUser = getRequestAuthenticatedUser(req)
-        if (!authenticatedUser) {
-          setJson(res, 401, { error: 'Authentication required' })
-          return
-        }
-
         const connectorId = connectorResource.connectorId
         if (!isValidConnectorId(connectorId)) {
           setJson(res, 400, { error: `Invalid connector id "${connectorId}"` })
+          return
+        }
+
+        if (req.method === 'POST' && connectorResource.action === 'bootstrap-exchange') {
+          const bootstrapLookup = await findConnectorByBootstrapToken(connectorId, readBearerToken(req))
+          if (!bootstrapLookup) {
+            setJson(res, 401, { error: 'Invalid bootstrap token' })
+            return
+          }
+
+          const { scope, state, connector: currentConnector, index } = bootstrapLookup
+          if (isBootstrapExpired(currentConnector)) {
+            const expiredConnector: CodexConnectorRecord = {
+              ...currentConnector,
+              updatedAtIso: new Date().toISOString(),
+            }
+            const expiredConnectors = [...state.connectors]
+            expiredConnectors[index] = expiredConnector
+            await writeConnectorRegistryState(scope, { connectors: expiredConnectors })
+            setJson(res, 410, { error: 'Bootstrap token expired' })
+            return
+          }
+          if (currentConnector.bootstrapConsumedAtIso) {
+            setJson(res, 409, { error: 'Bootstrap token already consumed' })
+            return
+          }
+
+          const issued = relayHub.issueAgentToken(currentConnector.relayAgentId)
+          const nowIso = new Date().toISOString()
+          const nextConnector: CodexConnectorRecord = {
+            ...currentConnector,
+            credentialHash: issued.tokenHash,
+            credentialIssuedAtIso: nowIso,
+            bootstrapConsumedAtIso: nowIso,
+            updatedAtIso: nowIso,
+          }
+          const nextConnectors = [...state.connectors]
+          nextConnectors[index] = nextConnector
+          await writeConnectorRegistryState(scope, { connectors: nextConnectors })
+          relayHub.upsertPersistedAgent({
+            id: nextConnector.relayAgentId,
+            name: nextConnector.name,
+            ...(nextConnector.credentialHash ? { tokenHash: nextConnector.credentialHash } : {}),
+            createdAtIso: nextConnector.createdAtIso,
+            updatedAtIso: nextConnector.updatedAtIso,
+          })
+          setJson(res, 200, {
+            data: {
+              connector: toPublicConnectorRecord(nextConnector, relayHub, {
+                projectCount: nextConnector.lastKnownProjectCount,
+                threadCount: nextConnector.lastKnownThreadCount,
+                lastStatsAtIso: nextConnector.lastStatsAtIso,
+              }),
+              credentialToken: issued.token,
+            },
+          })
+          return
+        }
+
+        const authenticatedUser = getRequestAuthenticatedUser(req)
+        if (!authenticatedUser) {
+          setJson(res, 401, { error: 'Authentication required' })
           return
         }
 
@@ -2657,11 +2853,19 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
         }
 
         if (req.method === 'POST' && connectorResource.action === 'rotate-token') {
-          const rotated = relayHub.rotateAgentToken(currentConnector.relayAgentId)
+          relayHub.clearAgentToken(currentConnector.relayAgentId)
+          const nowIso = new Date().toISOString()
+          const requestedBootstrapTtlMs = CONNECTOR_BOOTSTRAP_TTL_MS
+          const bootstrapToken = createConnectorSecretToken()
           const nextConnector: CodexConnectorRecord = {
             ...currentConnector,
-            tokenHash: rotated.tokenHash,
-            updatedAtIso: new Date().toISOString(),
+            credentialHash: undefined,
+            credentialIssuedAtIso: currentConnector.credentialIssuedAtIso,
+            bootstrapTokenHash: hashConnectorSecret(bootstrapToken),
+            bootstrapIssuedAtIso: nowIso,
+            bootstrapExpiresAtIso: getBootstrapExpiryIso(nowIso, requestedBootstrapTtlMs),
+            bootstrapConsumedAtIso: undefined,
+            updatedAtIso: nowIso,
           }
           const nextConnectors = [...registry.connectors]
           nextConnectors[connectorIndex] = nextConnector
@@ -2673,7 +2877,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
                 threadCount: nextConnector.lastKnownThreadCount,
                 lastStatsAtIso: nextConnector.lastStatsAtIso,
               }),
-              token: rotated.token,
+              bootstrapToken,
             },
           })
           return

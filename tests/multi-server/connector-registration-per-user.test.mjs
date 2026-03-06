@@ -59,7 +59,7 @@ async function createUserAndSession(baseUrl, username, role = 'user', adminCooki
   return cookie
 }
 
-test('connector registry is isolated per authenticated user and returns an installation token only at creation time', async () => {
+test('connector registry is isolated per authenticated user and returns bootstrap install metadata without leaking secrets on list', async () => {
   await withApiServer(async (baseUrl) => {
     const adminCookie = await createUserAndSession(baseUrl, 'connector-admin', 'admin')
     const alphaCookie = await createUserAndSession(baseUrl, 'connector-alpha', 'user', adminCookie)
@@ -80,8 +80,10 @@ test('connector registry is isolated per authenticated user and returns an insta
     assert.equal(alphaCreateBody.data.connector.name, 'Alpha Laptop')
     assert.equal(alphaCreateBody.data.connector.hubAddress, 'https://hub.example.test')
     assert.equal(alphaCreateBody.data.connector.connected, false)
-    assert.equal(typeof alphaCreateBody.data.token, 'string')
-    assert.ok(alphaCreateBody.data.token.length >= 24)
+    assert.equal(alphaCreateBody.data.connector.installState, 'pending_install')
+    assert.equal(typeof alphaCreateBody.data.connector.bootstrapExpiresAtIso, 'string')
+    assert.equal(typeof alphaCreateBody.data.bootstrapToken, 'string')
+    assert.ok(alphaCreateBody.data.bootstrapToken.length >= 24)
 
     const alphaListResponse = await fetch(`${baseUrl}/codex-api/connectors`, {
       headers: { Cookie: alphaCookie },
@@ -94,6 +96,7 @@ test('connector registry is isolated per authenticated user and returns an insta
         name: connector.name,
         hubAddress: connector.hubAddress,
         connected: connector.connected,
+        installState: connector.installState,
       })),
       [
         {
@@ -101,10 +104,14 @@ test('connector registry is isolated per authenticated user and returns an insta
           name: 'Alpha Laptop',
           hubAddress: 'https://hub.example.test',
           connected: false,
+          installState: 'pending_install',
         },
       ],
     )
     assert.equal(alphaListBody.data.connectors[0].token, undefined)
+    assert.equal(alphaListBody.data.connectors[0].bootstrapToken, undefined)
+    assert.equal(alphaListBody.data.connectors[0].installState, 'pending_install')
+    assert.equal(typeof alphaListBody.data.connectors[0].bootstrapExpiresAtIso, 'string')
 
     const betaListResponse = await fetch(`${baseUrl}/codex-api/connectors`, {
       headers: { Cookie: betaCookie },

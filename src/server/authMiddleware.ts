@@ -210,6 +210,9 @@ function shouldReturnJsonForUnauthorized(req: Request): boolean {
 }
 
 function isPublicRelayAgentPath(path: string, method: string): boolean {
+  if (method === 'POST' && /^\/codex-api\/connectors\/[^/]+\/bootstrap-exchange$/u.test(path)) {
+    return true
+  }
   if (method === 'POST' && path === '/codex-api/relay/agent/connect') {
     return true
   }

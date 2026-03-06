@@ -10,6 +10,7 @@ const CONNECTOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const RELAY_E2EE_ALGORITHM = 'aes-256-gcm'
 const DEFAULT_RELAY_PROTOCOL = 'relay-http-v1'
 const DEFAULT_RELAY_TIMEOUT_MS = 60_000
+const CONNECTOR_BOOTSTRAP_TTL_MS = 15 * 60_000
 
 function isLoopbackHostname(hostname) {
   const normalized = String(hostname ?? '').trim().toLowerCase().replace(/^\[/u, '').replace(/\]$/u, '')
@@ -126,6 +127,66 @@ function clampTimeoutMs(value) {
   if (normalized < 5_000) return 5_000
   if (normalized > 300_000) return 300_000
   return normalized
+}
+
+function createConnectorSecretToken() {
+  return `connector-token-${randomBytes(12).toString('hex')}`
+}
+
+function getBootstrapExpiryIso(issuedAtIso, ttlMs = CONNECTOR_BOOTSTRAP_TTL_MS) {
+  return new Date(new Date(issuedAtIso).valueOf() + ttlMs).toISOString()
+}
+
+function isBootstrapExpired(connector, nowMs = Date.now()) {
+  if (!connector.bootstrapTokenHash || !connector.bootstrapExpiresAtIso) {
+    return false
+  }
+  const expiresAtMs = Date.parse(connector.bootstrapExpiresAtIso)
+  return Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs
+}
+
+function deriveInstallState(connector) {
+  if (connector.credentialHash) {
+    return connector.connected === true ? 'connected' : 'offline'
+  }
+
+  if (connector.bootstrapTokenHash) {
+    if (isBootstrapExpired(connector)) {
+      return 'expired_bootstrap'
+    }
+    return connector.bootstrapConsumedAtIso || connector.credentialIssuedAtIso
+      ? 'reinstall_required'
+      : 'pending_install'
+  }
+
+  return connector.bootstrapConsumedAtIso || connector.credentialIssuedAtIso
+    ? 'reinstall_required'
+    : 'pending_install'
+}
+
+function serializeConnector(connector, options = {}) {
+  const includeStats = options.includeStats === true
+  return {
+    id: connector.id,
+    serverId: connector.serverId,
+    name: connector.name,
+    hubAddress: connector.hubAddress,
+    relayAgentId: connector.relayAgentId,
+    ...(connector.relayE2eeKeyId ? { relayE2eeKeyId: connector.relayE2eeKeyId } : {}),
+    createdAtIso: connector.createdAtIso,
+    updatedAtIso: connector.updatedAtIso,
+    installState: deriveInstallState(connector),
+    ...(connector.bootstrapIssuedAtIso ? { bootstrapIssuedAtIso: connector.bootstrapIssuedAtIso } : {}),
+    ...(connector.bootstrapExpiresAtIso ? { bootstrapExpiresAtIso: connector.bootstrapExpiresAtIso } : {}),
+    ...(connector.bootstrapConsumedAtIso ? { bootstrapConsumedAtIso: connector.bootstrapConsumedAtIso } : {}),
+    ...(connector.credentialIssuedAtIso ? { credentialIssuedAtIso: connector.credentialIssuedAtIso } : {}),
+    connected: connector.connected === true,
+    ...(connector.lastSeenAtIso ? { lastSeenAtIso: connector.lastSeenAtIso } : {}),
+    ...(includeStats && connector.lastKnownProjectCount !== undefined ? { projectCount: connector.lastKnownProjectCount } : {}),
+    ...(includeStats && connector.lastKnownThreadCount !== undefined ? { threadCount: connector.lastKnownThreadCount } : {}),
+    ...(includeStats && connector.lastStatsAtIso ? { lastStatsAtIso: connector.lastStatsAtIso } : {}),
+    ...(includeStats ? { statsStale: connector.connected === true ? false : connector.lastStatsAtIso !== undefined } : {}),
+  }
 }
 
 function normalizeServerTransport(value) {
@@ -254,6 +315,50 @@ export function createMultiUserContractApi() {
     const created = []
     connectorsByUserId.set(userId, created)
     return created
+  }
+
+  function findConnectorByBootstrapToken(connectorId, token) {
+    const normalizedToken = typeof token === 'string' ? token.trim() : ''
+    if (!normalizedToken) {
+      return null
+    }
+    const tokenHash = hashSecret(normalizedToken)
+
+    for (const [userId, connectors] of connectorsByUserId.entries()) {
+      const index = connectors.findIndex((connector) => {
+        return connector.id === connectorId && connector.bootstrapTokenHash === tokenHash
+      })
+      if (index === -1) continue
+      return {
+        userId,
+        connectors,
+        connector: connectors[index],
+        index,
+      }
+    }
+
+    return null
+  }
+
+  function findConnectorByCredentialToken(token) {
+    const normalizedToken = typeof token === 'string' ? token.trim() : ''
+    if (!normalizedToken) {
+      return null
+    }
+    const tokenHash = hashSecret(normalizedToken)
+
+    for (const [userId, connectors] of connectorsByUserId.entries()) {
+      const index = connectors.findIndex((connector) => connector.credentialHash === tokenHash)
+      if (index === -1) continue
+      return {
+        userId,
+        connectors,
+        connector: connectors[index],
+        index,
+      }
+    }
+
+    return null
   }
 
   function upsertConnectorServer(userId, connector) {
@@ -411,6 +516,40 @@ export function createMultiUserContractApi() {
       const serverMatch = url.pathname.match(/^\/codex-api\/servers\/([^/]+)$/u)
       const connectorMatch = url.pathname.match(/^\/codex-api\/connectors\/([^/]+)(?:\/([^/]+))?$/u)
 
+      if (method === 'POST' && url.pathname === '/codex-api/relay/agent/connect') {
+        const authorization = getHeaderValue(request?.headers, 'authorization')
+        const [scheme, token] = authorization.split(/\s+/u, 2)
+        if (!scheme || scheme.toLowerCase() !== 'bearer' || !token) {
+          return jsonResponse(401, { error: 'Missing relay agent token' })
+        }
+        const match = findConnectorByCredentialToken(token)
+        if (!match) {
+          return jsonResponse(401, { error: 'Invalid relay agent token' })
+        }
+        const nowIso = new Date().toISOString()
+        const next = {
+          ...match.connector,
+          connected: true,
+          lastSeenAtIso: nowIso,
+          updatedAtIso: nowIso,
+        }
+        match.connectors[match.index] = next
+        return jsonResponse(200, {
+          data: {
+            sessionId: `session-${randomBytes(6).toString('hex')}`,
+            pollTimeoutMs: 25_000,
+            agent: {
+              id: next.relayAgentId,
+              name: next.name,
+              createdAtIso: next.createdAtIso,
+              updatedAtIso: next.updatedAtIso,
+              connected: true,
+              lastSeenAtIso: next.lastSeenAtIso,
+            },
+          },
+        })
+      }
+
       if (url.pathname === '/codex-api/servers') {
         const user = resolveSessionUser(request?.headers)
         if (!user) {
@@ -485,21 +624,7 @@ export function createMultiUserContractApi() {
 
         if (method === 'GET') {
           const includeStats = ['1', 'true', 'yes'].includes((url.searchParams.get('includeStats') ?? '').trim().toLowerCase())
-          const connectors = getConnectorRegistry(user.id).map((connector) => ({
-            id: connector.id,
-            serverId: connector.serverId,
-            name: connector.name,
-            hubAddress: connector.hubAddress,
-            relayAgentId: connector.relayAgentId,
-            ...(connector.relayE2eeKeyId ? { relayE2eeKeyId: connector.relayE2eeKeyId } : {}),
-            createdAtIso: connector.createdAtIso,
-            updatedAtIso: connector.updatedAtIso,
-            connected: connector.connected === true,
-            ...(includeStats && connector.lastKnownProjectCount !== undefined ? { projectCount: connector.lastKnownProjectCount } : {}),
-            ...(includeStats && connector.lastKnownThreadCount !== undefined ? { threadCount: connector.lastKnownThreadCount } : {}),
-            ...(includeStats && connector.lastStatsAtIso ? { lastStatsAtIso: connector.lastStatsAtIso } : {}),
-            ...(includeStats ? { statsStale: connector.connected === true ? false : connector.lastStatsAtIso !== undefined } : {}),
-          }))
+          const connectors = getConnectorRegistry(user.id).map((connector) => serializeConnector(connector, { includeStats }))
           return jsonResponse(200, { data: { connectors } })
         }
 
@@ -530,7 +655,12 @@ export function createMultiUserContractApi() {
             return jsonResponse(400, { error: 'Valid hubAddress is required. Use HTTPS for non-local hubs.' })
           }
           const nowIso = new Date().toISOString()
-          const token = `connector-token-${randomBytes(12).toString('hex')}`
+          const bootstrapTtlMs = Number.isFinite(Number(payload.bootstrapTtlMs))
+            ? Math.trunc(Number(payload.bootstrapTtlMs))
+            : CONNECTOR_BOOTSTRAP_TTL_MS
+          const bootstrapToken = createConnectorSecretToken()
+          const simulateInstalled = payload.mockStatus?.connected === true
+          const installedCredentialToken = simulateInstalled ? createConnectorSecretToken() : ''
           const connector = {
             id: connectorId,
             serverId: connectorId,
@@ -539,7 +669,17 @@ export function createMultiUserContractApi() {
             relayAgentId: `agent-${String(nextConnectorNumber)}`,
             createdAtIso: nowIso,
             updatedAtIso: nowIso,
-            tokenHash: hashSecret(token),
+            ...(simulateInstalled
+              ? {
+                  credentialHash: hashSecret(installedCredentialToken),
+                  credentialIssuedAtIso: nowIso,
+                  bootstrapConsumedAtIso: nowIso,
+                }
+              : {
+                  bootstrapTokenHash: hashSecret(bootstrapToken),
+                  bootstrapIssuedAtIso: nowIso,
+                  bootstrapExpiresAtIso: getBootstrapExpiryIso(nowIso, bootstrapTtlMs),
+                }),
             connected: payload.mockStatus?.connected === true,
             lastKnownProjectCount: Number.isFinite(Number(payload.mockStatus?.projectCount))
               ? Math.max(0, Math.trunc(Number(payload.mockStatus.projectCount)))
@@ -555,17 +695,8 @@ export function createMultiUserContractApi() {
 
           return jsonResponse(201, {
             data: {
-              connector: {
-                id: connector.id,
-                serverId: connector.serverId,
-                name: connector.name,
-                hubAddress: connector.hubAddress,
-                relayAgentId: connector.relayAgentId,
-                createdAtIso: connector.createdAtIso,
-                updatedAtIso: connector.updatedAtIso,
-                connected: false,
-              },
-              token,
+              connector: serializeConnector(connector),
+              bootstrapToken,
             },
           })
         }
@@ -574,14 +705,52 @@ export function createMultiUserContractApi() {
       }
 
       if (connectorMatch) {
-        const user = resolveSessionUser(request?.headers)
-        if (!user) {
-          return jsonResponse(401, { error: 'Unauthorized' })
-        }
         const connectorId = connectorMatch[1]
         const action = connectorMatch[2] ?? null
         if (!CONNECTOR_ID_PATTERN.test(connectorId)) {
           return jsonResponse(400, { error: `Invalid connector id "${connectorId}"` })
+        }
+
+        if (method === 'POST' && action === 'bootstrap-exchange') {
+          const authorization = getHeaderValue(request?.headers, 'authorization')
+          const [scheme, token] = authorization.split(/\s+/u, 2)
+          if (!scheme || scheme.toLowerCase() !== 'bearer' || !token) {
+            return jsonResponse(401, { error: 'Invalid bootstrap token' })
+          }
+
+          const bootstrapLookup = findConnectorByBootstrapToken(connectorId, token)
+          if (!bootstrapLookup) {
+            return jsonResponse(401, { error: 'Invalid bootstrap token' })
+          }
+          if (bootstrapLookup.connector.bootstrapConsumedAtIso) {
+            return jsonResponse(409, { error: 'Bootstrap token already consumed' })
+          }
+          if (isBootstrapExpired(bootstrapLookup.connector)) {
+            return jsonResponse(410, { error: 'Bootstrap token expired' })
+          }
+
+          const credentialToken = createConnectorSecretToken()
+          const nowIso = new Date().toISOString()
+          const next = {
+            ...bootstrapLookup.connector,
+            credentialHash: hashSecret(credentialToken),
+            credentialIssuedAtIso: nowIso,
+            bootstrapConsumedAtIso: nowIso,
+            connected: false,
+            updatedAtIso: nowIso,
+          }
+          bootstrapLookup.connectors[bootstrapLookup.index] = next
+          return jsonResponse(200, {
+            data: {
+              connector: serializeConnector(next),
+              credentialToken,
+            },
+          })
+        }
+
+        const user = resolveSessionUser(request?.headers)
+        if (!user) {
+          return jsonResponse(401, { error: 'Unauthorized' })
         }
         const connectors = getConnectorRegistry(user.id)
         const connectorIndex = connectors.findIndex((connector) => connector.id === connectorId)
@@ -607,41 +776,30 @@ export function createMultiUserContractApi() {
           upsertConnectorServer(user.id, next)
           return jsonResponse(200, {
             data: {
-              connector: {
-                id: next.id,
-                serverId: next.serverId,
-                name: next.name,
-                hubAddress: next.hubAddress,
-                relayAgentId: next.relayAgentId,
-                createdAtIso: next.createdAtIso,
-                updatedAtIso: next.updatedAtIso,
-                connected: false,
-              },
+              connector: serializeConnector(next),
             },
           })
         }
 
         if (method === 'POST' && action === 'rotate-token') {
-          const token = `connector-token-${randomBytes(12).toString('hex')}`
+          const bootstrapToken = createConnectorSecretToken()
+          const nowIso = new Date().toISOString()
           const next = {
             ...current,
-            tokenHash: hashSecret(token),
-            updatedAtIso: new Date().toISOString(),
+            credentialHash: undefined,
+            connected: false,
+            lastSeenAtIso: undefined,
+            bootstrapTokenHash: hashSecret(bootstrapToken),
+            bootstrapIssuedAtIso: nowIso,
+            bootstrapExpiresAtIso: getBootstrapExpiryIso(nowIso),
+            bootstrapConsumedAtIso: undefined,
+            updatedAtIso: nowIso,
           }
           connectors[connectorIndex] = next
           return jsonResponse(200, {
             data: {
-              connector: {
-                id: next.id,
-                serverId: next.serverId,
-                name: next.name,
-                hubAddress: next.hubAddress,
-                relayAgentId: next.relayAgentId,
-                createdAtIso: next.createdAtIso,
-                updatedAtIso: next.updatedAtIso,
-                connected: false,
-              },
-              token,
+              connector: serializeConnector(next),
+              bootstrapToken,
             },
           })
         }
@@ -652,20 +810,7 @@ export function createMultiUserContractApi() {
           return jsonResponse(200, {
             ok: true,
             data: {
-              connectors: connectors.map((connector) => ({
-                id: connector.id,
-                serverId: connector.serverId,
-                name: connector.name,
-                hubAddress: connector.hubAddress,
-                relayAgentId: connector.relayAgentId,
-                createdAtIso: connector.createdAtIso,
-                updatedAtIso: connector.updatedAtIso,
-                connected: false,
-                ...(connector.lastKnownProjectCount !== undefined ? { projectCount: connector.lastKnownProjectCount } : {}),
-                ...(connector.lastKnownThreadCount !== undefined ? { threadCount: connector.lastKnownThreadCount } : {}),
-                ...(connector.lastStatsAtIso ? { lastStatsAtIso: connector.lastStatsAtIso } : {}),
-                statsStale: connector.connected === true ? false : connector.lastStatsAtIso !== undefined,
-              })),
+              connectors: connectors.map((connector) => serializeConnector(connector, { includeStats: true })),
             },
           })
         }

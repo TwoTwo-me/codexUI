@@ -77,7 +77,7 @@ async function createUserAndSession(baseUrl, username, role = 'user', adminCooki
   return cookie
 }
 
-test('connector management supports server binding, rename, token rotation, and delete cleanup per user', async () => {
+test('connector management supports server binding, rename, reinstall token rotation, and delete cleanup per user', async () => {
   await withApiServer(async (baseUrl) => {
     const adminCookie = await createUserAndSession(baseUrl, 'connector-manage-admin', 'admin')
     const alphaCookie = await createUserAndSession(baseUrl, 'connector-manage-alpha', 'user', adminCookie)
@@ -97,7 +97,9 @@ test('connector management supports server binding, rename, token rotation, and 
     assert.equal(createBody.data.connector.id, 'alpha-edge')
     assert.equal(createBody.data.connector.serverId, 'alpha-edge')
     assert.equal(createBody.data.connector.connected, false)
-    assert.equal(typeof createBody.data.token, 'string')
+    assert.equal(createBody.data.connector.installState, 'pending_install')
+    assert.equal(typeof createBody.data.connector.bootstrapExpiresAtIso, 'string')
+    assert.equal(typeof createBody.data.bootstrapToken, 'string')
 
     const alphaServersResponse = await fetch(`${baseUrl}/codex-api/servers`, {
       headers: { Cookie: alphaCookie },
@@ -150,8 +152,9 @@ test('connector management supports server binding, rename, token rotation, and 
     assert.equal(rotateResponse.status, 200)
     const rotateBody = await rotateResponse.json()
     assert.equal(rotateBody.data.connector.id, 'alpha-edge')
-    assert.equal(typeof rotateBody.data.token, 'string')
-    assert.notEqual(rotateBody.data.token, createBody.data.token)
+    assert.equal(rotateBody.data.connector.installState, 'pending_install')
+    assert.equal(typeof rotateBody.data.bootstrapToken, 'string')
+    assert.notEqual(rotateBody.data.bootstrapToken, createBody.data.bootstrapToken)
 
     const betaDeleteResponse = await deleteRequest(`${baseUrl}/codex-api/connectors/alpha-edge`, {
       Cookie: betaCookie,
@@ -262,5 +265,141 @@ test('connector registration rejects insecure remote hub addresses while allowin
       { Cookie: alphaCookie },
     )
     assert.equal(loopbackResponse.status, 201)
+  })
+})
+
+test('connector bootstrap exchange issues a durable credential, rejects replay, and rotates reinstall tokens', async () => {
+  await withApiServer(async (baseUrl) => {
+    const adminCookie = await createUserAndSession(baseUrl, 'connector-bootstrap-admin', 'admin')
+    const alphaCookie = await createUserAndSession(baseUrl, 'connector-bootstrap-alpha', 'user', adminCookie)
+
+    const createResponse = await postJson(
+      `${baseUrl}/codex-api/connectors`,
+      {
+        id: 'alpha-edge',
+        name: 'Alpha Edge',
+        hubAddress: 'https://hub.example.test',
+      },
+      { Cookie: alphaCookie },
+    )
+    assert.equal(createResponse.status, 201)
+    const createBody = await createResponse.json()
+    const bootstrapToken = createBody.data.bootstrapToken
+    assert.equal(createBody.data.connector.installState, 'pending_install')
+
+    const bootstrapRejectedByRelay = await fetch(`${baseUrl}/codex-api/relay/agent/connect`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${bootstrapToken}`,
+      },
+    })
+    assert.equal(bootstrapRejectedByRelay.status, 401)
+
+    const exchangeResponse = await postJson(
+      `${baseUrl}/codex-api/connectors/alpha-edge/bootstrap-exchange`,
+      {
+        hostname: 'alpha-host',
+        platform: 'linux',
+        connectorVersion: '0.1.4',
+      },
+      {
+        Authorization: `Bearer ${bootstrapToken}`,
+      },
+    )
+    assert.equal(exchangeResponse.status, 200)
+    const exchangeBody = await exchangeResponse.json()
+    assert.equal(typeof exchangeBody.data.credentialToken, 'string')
+    assert.equal(exchangeBody.data.connector.installState, 'offline')
+
+    const relayConnectResponse = await fetch(`${baseUrl}/codex-api/relay/agent/connect`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${exchangeBody.data.credentialToken}`,
+      },
+    })
+    assert.equal(relayConnectResponse.status, 200)
+
+    const replayResponse = await postJson(
+      `${baseUrl}/codex-api/connectors/alpha-edge/bootstrap-exchange`,
+      {},
+      {
+        Authorization: `Bearer ${bootstrapToken}`,
+      },
+    )
+    assert.equal(replayResponse.status, 409)
+
+    const connectorsAfterInstall = await fetch(`${baseUrl}/codex-api/connectors`, {
+      headers: { Cookie: alphaCookie },
+    })
+    assert.equal(connectorsAfterInstall.status, 200)
+    const connectorsAfterInstallBody = await connectorsAfterInstall.json()
+    assert.equal(connectorsAfterInstallBody.data.connectors[0].installState, 'connected')
+    assert.equal(typeof connectorsAfterInstallBody.data.connectors[0].bootstrapConsumedAtIso, 'string')
+
+    const rotateResponse = await postJson(
+      `${baseUrl}/codex-api/connectors/alpha-edge/rotate-token`,
+      {},
+      { Cookie: alphaCookie },
+    )
+    assert.equal(rotateResponse.status, 200)
+    const rotateBody = await rotateResponse.json()
+    assert.equal(rotateBody.data.connector.installState, 'reinstall_required')
+    assert.equal(typeof rotateBody.data.bootstrapToken, 'string')
+
+    const oldCredentialRejected = await fetch(`${baseUrl}/codex-api/relay/agent/connect`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${exchangeBody.data.credentialToken}`,
+      },
+    })
+    assert.equal(oldCredentialRejected.status, 401)
+
+    const reinstallExchange = await postJson(
+      `${baseUrl}/codex-api/connectors/alpha-edge/bootstrap-exchange`,
+      {},
+      {
+        Authorization: `Bearer ${rotateBody.data.bootstrapToken}`,
+      },
+    )
+    assert.equal(reinstallExchange.status, 200)
+    const reinstallBody = await reinstallExchange.json()
+    assert.equal(typeof reinstallBody.data.credentialToken, 'string')
+    assert.notEqual(reinstallBody.data.credentialToken, exchangeBody.data.credentialToken)
+  })
+})
+
+test('connector bootstrap exchange rejects expired bootstrap tokens and reports expiration state', async () => {
+  await withApiServer(async (baseUrl) => {
+    const adminCookie = await createUserAndSession(baseUrl, 'connector-expired-admin', 'admin')
+    const alphaCookie = await createUserAndSession(baseUrl, 'connector-expired-alpha', 'user', adminCookie)
+
+    const createResponse = await postJson(
+      `${baseUrl}/codex-api/connectors`,
+      {
+        id: 'expired-edge',
+        name: 'Expired Edge',
+        hubAddress: 'https://hub.example.test',
+        bootstrapTtlMs: -1,
+      },
+      { Cookie: alphaCookie },
+    )
+    assert.equal(createResponse.status, 201)
+    const createBody = await createResponse.json()
+
+    const listResponse = await fetch(`${baseUrl}/codex-api/connectors`, {
+      headers: { Cookie: alphaCookie },
+    })
+    assert.equal(listResponse.status, 200)
+    const listBody = await listResponse.json()
+    assert.equal(listBody.data.connectors[0].installState, 'expired_bootstrap')
+
+    const exchangeResponse = await postJson(
+      `${baseUrl}/codex-api/connectors/expired-edge/bootstrap-exchange`,
+      {},
+      {
+        Authorization: `Bearer ${createBody.data.bootstrapToken}`,
+      },
+    )
+    assert.equal(exchangeResponse.status, 410)
   })
 })

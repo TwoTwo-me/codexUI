@@ -22,7 +22,7 @@ const MAX_ALLOWED_ROUTES_PER_AGENT = 1_024
 type RelayAgentRecord = {
   id: string
   name: string
-  tokenHash: string
+  tokenHash?: string
   createdAtIso: string
   updatedAtIso: string
   lastSeenAtIso?: string
@@ -172,10 +172,14 @@ export class OutboundRelayHub {
     return toPublicAgentRecord(merged, this.sessionIdByAgentId.has(agent.id))
   }
 
-  createAgent(name?: string): { agent: RelayAgentPublicRecord; token: string; tokenHash: string } {
+  createAgent(
+    name?: string,
+    options: { issueToken?: boolean } = {},
+  ): { agent: RelayAgentPublicRecord; token?: string; tokenHash?: string } {
     const nowIso = new Date().toISOString()
-    const token = createSecretToken()
-    const tokenHash = hashToken(token)
+    const issueToken = options.issueToken !== false
+    const token = issueToken ? createSecretToken() : undefined
+    const tokenHash = token ? hashToken(token) : undefined
     let id = createAgentId()
     while (this.agentsById.has(id)) {
       id = createAgentId()
@@ -188,7 +192,7 @@ export class OutboundRelayHub {
     const record: RelayAgentRecord = {
       id,
       name: normalizedName,
-      tokenHash,
+      ...(tokenHash ? { tokenHash } : {}),
       createdAtIso: nowIso,
       updatedAtIso: nowIso,
     }
@@ -236,6 +240,27 @@ export class OutboundRelayHub {
       token,
       tokenHash,
     }
+  }
+
+  issueAgentToken(agentId: string): { agent: RelayAgentPublicRecord; token: string; tokenHash: string } {
+    return this.rotateAgentToken(agentId)
+  }
+
+  clearAgentToken(agentId: string): RelayAgentPublicRecord {
+    const agent = this.agentsById.get(agentId)
+    if (!agent) {
+      throw new RelayHubError('relay_agent_not_found', `Relay agent "${agentId}" not found`, 404)
+    }
+
+    delete agent.tokenHash
+    agent.updatedAtIso = new Date().toISOString()
+
+    const sessionId = this.sessionIdByAgentId.get(agentId)
+    if (sessionId) {
+      this.disposeSession(sessionId)
+    }
+
+    return toPublicAgentRecord(agent, false)
   }
 
   revokeAgent(agentId: string): void {
@@ -451,7 +476,7 @@ export class OutboundRelayHub {
 
     const tokenHash = hashToken(normalized)
     for (const agent of this.agentsById.values()) {
-      if (agent.tokenHash === tokenHash) {
+      if (agent.tokenHash && agent.tokenHash === tokenHash) {
         return { agent, tokenHash }
       }
     }
