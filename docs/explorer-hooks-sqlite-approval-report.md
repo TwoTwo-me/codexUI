@@ -1,46 +1,82 @@
-# Explorer / Hooks / SQLite / Approval Rollout Report
+# Explorer / Hooks / SQLite Auth Rollout Report
+
+_Date: 2026-03-08_
 
 ## Scope
-This rollout completed the remaining phased work requested for the Hub UI and persistence model:
+This report covers the follow-up execution after the original multi-server / connector rollout:
 
 - **Phase A** — server-scoped explorer state
-- **Phase B** — hook badges + hook inbox panel
-- **Phase C** — open threads at the latest message
+- **Phase B** — hook badges + hook inbox
+- **Phase C** — open-thread scroll-to-bottom behavior
 - **Phase D** — SQLite-backed Hub persistence
-- **Phase E** — public signup + admin approval UI
+- **Phase E** — public signup + admin approval UI flow
 
 ## Delivered
 
-### Phase A — Server-scoped explorer state
-- Explorer project trees now stay scoped to the selected server.
-- Workspace root labels/order/active state are isolated per **user + server**.
-- Project collapse state is also server-scoped.
-- Commit: `7fdbf26` — `Scope explorer state by server`
+### Phase A — server-scoped explorer state
+- Project labels, ordering, collapsed state, and workspace-roots state are now scoped by **server id**.
+- Switching servers no longer leaks folders/projects from another server.
+- Workspace-roots state is persisted per **user + server**.
 
-### Phase B — Hooks inbox and red-dot badges
-- Added server/project/thread hook badges in the sidebar.
-- Added a **Hooks** panel that lists pending hook requests in newest-first order.
-- Clicking a hook entry opens the matching thread.
-- Hook activity now lifts the most recently alerted project to the top.
-- Commit: `82e6b8d` — `Add hook inbox and alert badges`
+**Commit**: `7fdbf26` — `Scope explorer state by server`
 
-### Phase C — Open thread at latest message
-- Opening a thread now jumps to the latest message instead of restoring a stale scroll position first.
-- Commit: `38f106c` — `Open threads at the latest message`
+**Capture**
+
+![Server-scoped explorer](screenshots/server-scoped-explorer-desktop.png)
+
+### Phase B — hook badges + hook inbox
+- Added **server / project / thread** hook badges.
+- Added a dedicated **Hooks** inbox route/panel.
+- Hook ordering now lifts the most recently hooked project to the top.
+- Clicking a hook inbox item opens the matching thread.
+
+**Commit**: `82e6b8d` — `Add hook inbox and alert badges`
+
+**Captures**
+
+![Hook ordering in sidebar](screenshots/hooks-sidebar-order-desktop.png)
+
+![Hook inbox opening a thread](screenshots/hooks-inbox-open-thread-desktop.png)
+
+### Phase C — thread open scroll behavior
+- Opening a thread now jumps to the **latest message** first.
+- Saved scroll state continues to work for subsequent revisits.
+
+**Commit**: `38f106c` — `Open threads at the latest message`
+
+**Capture**
+
+![Thread opens at latest message](screenshots/thread-open-scroll-bottom-desktop.png)
 
 ### Phase D — SQLite-backed Hub persistence
-- Hub user storage moved to SQLite (`codexui/hub.sqlite`).
-- Global Hub state moved from `.codex-global-state.json` semantics into SQLite state entries.
-- Existing auth/bootstrap hash flows continue to work.
-- SQLite persistence is verified for restart survival and per-user registry storage.
-- Commit: `20b11b5` — `Migrate hub persistence to SQLite`
+- Hub state moved to **SQLite** at `CODEX_HOME/codexui/hub.sqlite`.
+- Bootstrap admin credentials, user rows, server registries, connector registries, and persisted Hub state now survive restarts via SQLite.
+- Legacy `users.json` / `.codex-global-state.json` are imported on first run and then superseded by SQLite-backed storage.
 
-### Phase E — Public signup + admin approval
-- Added a login page with a **Request access** form.
-- Public registrations are created as **pending**.
-- Pending users cannot log in until approved by an admin.
-- Admin panel now shows approval status and exposes **Approve {username}** actions.
-- Commit: `c18fb2d` — `Add approval-driven admin UI flows`
+**Commit**: `20b11b5` — `Migrate hub persistence to SQLite`
+
+**Capture**
+
+![SQLite-backed bootstrap admin login](screenshots/bootstrap-admin-password-hash-login.png)
+
+### Phase E — public signup + admin approval
+- Added a public **Request access** flow on the login page.
+- Newly registered users stay **pending** until approved by an admin.
+- Added admin approval controls in **Admin Panel**.
+- Approved users can sign in immediately after approval.
+- Connector/server isolation remains user-scoped.
+
+**Commit**: `c18fb2d` — `Add approval-driven admin UI flows`
+
+**Captures**
+
+![Admin approval desktop flow](screenshots/signup-approval-admin-desktop.png)
+
+![Approved user login](screenshots/signup-approval-user-desktop.png)
+
+![Admin panel desktop](screenshots/phase2-admin-desktop.png)
+
+![Admin panel mobile](screenshots/phase2-admin-mobile.png)
 
 ## Verification
 
@@ -48,38 +84,50 @@ This rollout completed the remaining phased work requested for the Hub UI and pe
 - `npm run build` ✅
 
 ### Contract / integration tests
-- `npm run test:multi-server` ✅ (`37 passed`)
-- Includes:
-  - SQLite bootstrap/admin hash coverage
-  - SQLite registry persistence coverage
-  - public registration + admin approval contract coverage
-  - connector/server/workspace regression coverage
+- `npm run test:multi-server` ✅ (**37 passed**)
 
-### Playwright
-- `npx playwright test tests/playwright --reporter=line` ✅ (`10 passed`)
-- Includes:
-  - explicit registration empty state
-  - server-scoped explorer
-  - hooks ordering + inbox navigation
-  - thread open scroll-to-bottom
-  - settings/connectors lifecycle
-  - admin panel desktop/mobile captures
-  - signup approval flow
+### Playwright validation
+
+The final verification run used a live Vite dev server for mocked SPA scenarios and live `dist-cli` Hub instances for auth/admin approval scenarios.
+
+Command:
+
+```bash
+npm run build
+npm run test:multi-server
+
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:4310 npx playwright test \
+  tests/playwright/explicit-registration-empty-state.spec.ts \
+  tests/playwright/server-scoped-explorer.spec.ts \
+  tests/playwright/hooks-inbox.spec.ts \
+  tests/playwright/thread-open-scroll.spec.ts \
+  tests/playwright/settings-connectors.spec.ts \
+  tests/playwright/phase2-admin-ui.spec.ts \
+  tests/playwright/signup-approval.spec.ts \
+  --reporter=line
+```
+
+Result: **10 passed** ✅
 
 ## Screenshot inventory
-- `.artifacts/screenshots/server-scoped-explorer-desktop.png` — server-scoped explorer tree
-- `.artifacts/screenshots/hooks-sidebar-order-desktop.png` — hook badges + project ordering
-- `.artifacts/screenshots/hooks-inbox-open-thread-desktop.png` — hook inbox panel and thread navigation
-- `.artifacts/screenshots/thread-open-scroll-bottom-desktop.png` — thread opens at latest message
-- `.artifacts/screenshots/explicit-registration-empty-state-desktop.png` — registration-only empty state
-- `.artifacts/screenshots/phase2-admin-desktop.png` — admin panel desktop view
-- `.artifacts/screenshots/phase2-admin-mobile.png` — admin panel mobile view
-- `.artifacts/screenshots/signup-approval-admin-desktop.png` — pending user approval flow
-- `.artifacts/screenshots/signup-approval-user-desktop.png` — approved user login result
-- `.artifacts/screenshots/settings-connectors-desktop.png` — connector settings desktop view
-- `.artifacts/screenshots/settings-connectors-expired-desktop.png` — expired bootstrap recovery state
+
+### Core rollout
+- `docs/screenshots/server-scoped-explorer-desktop.png`
+- `docs/screenshots/hooks-sidebar-order-desktop.png`
+- `docs/screenshots/hooks-inbox-open-thread-desktop.png`
+- `docs/screenshots/thread-open-scroll-bottom-desktop.png`
+- `docs/screenshots/bootstrap-admin-password-hash-login.png`
+- `docs/screenshots/signup-approval-admin-desktop.png`
+- `docs/screenshots/signup-approval-user-desktop.png`
+- `docs/screenshots/phase2-admin-desktop.png`
+- `docs/screenshots/phase2-admin-mobile.png`
+
+### Regression captures also refreshed during final verification
+- `docs/screenshots/explicit-registration-empty-state-desktop.png`
+- `docs/screenshots/settings-connectors-desktop.png`
+- `docs/screenshots/settings-connectors-expired-desktop.png`
 
 ## Notes
-- The Hub is now persistence-backed by SQLite for user and Hub state storage.
-- New users still see **no servers by default** until they explicitly register a local server or Connector.
-- Connector isolation remains per authenticated user.
+- The Hub now uses SQLite as the authoritative store for users and persisted Hub/global state.
+- New non-admin users must be approved before sign-in succeeds.
+- Explorer state, server registries, connector registries, and approval-driven auth flows were all revalidated in the final end-to-end run.
