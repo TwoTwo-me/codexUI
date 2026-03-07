@@ -299,6 +299,7 @@ export function createMultiUserContractApi() {
   const sessionsByToken = new Map()
   const registryByUserId = new Map()
   const connectorsByUserId = new Map()
+  const workspaceRootsStateByUserId = new Map()
   const bootstrapGuessCountByKey = new Map()
 
   function resolveSessionUser(headers) {
@@ -328,6 +329,45 @@ export function createMultiUserContractApi() {
       servers: [],
     }
     registryByUserId.set(userId, created)
+    return created
+  }
+
+
+  function getRequestedServerId(headers, url) {
+    const headerServerId = getHeaderValue(headers, 'x-codex-server-id').trim()
+    if (headerServerId) {
+      return headerServerId
+    }
+    return url.searchParams.get('serverId')?.trim() || ''
+  }
+
+  function normalizeWorkspaceRootsState(value) {
+    const record = asRecord(value)
+    const normalizeArray = (candidate) => Array.isArray(candidate)
+      ? candidate.filter((item) => typeof item === 'string' && item.length > 0)
+      : []
+    const labels = {}
+    if (record?.labels && typeof record.labels === 'object' && !Array.isArray(record.labels)) {
+      for (const [key, label] of Object.entries(record.labels)) {
+        if (typeof key === 'string' && key.length > 0 && typeof label === 'string') {
+          labels[key] = label
+        }
+      }
+    }
+    return {
+      order: normalizeArray(record?.order),
+      labels,
+      active: normalizeArray(record?.active),
+    }
+  }
+
+  function getWorkspaceRootsRegistry(userId) {
+    const existing = workspaceRootsStateByUserId.get(userId)
+    if (existing) {
+      return existing
+    }
+    const created = new Map()
+    workspaceRootsStateByUserId.set(userId, created)
     return created
   }
 
@@ -597,6 +637,30 @@ export function createMultiUserContractApi() {
             },
           },
         })
+      }
+
+
+      if (url.pathname === '/codex-api/workspace-roots-state') {
+        const user = resolveSessionUser(request?.headers)
+        if (!user) {
+          return jsonResponse(401, { error: 'Unauthorized' })
+        }
+
+        const serverId = getRequestedServerId(request?.headers, url)
+        const registry = getWorkspaceRootsRegistry(user.id)
+
+        if (method === 'GET') {
+          return jsonResponse(200, { data: registry.get(serverId) ?? { order: [], labels: {}, active: [] } })
+        }
+
+        if (method === 'PUT') {
+          const payload = parseJsonBody(request?.body)
+          const nextState = normalizeWorkspaceRootsState(payload)
+          registry.set(serverId, nextState)
+          return jsonResponse(200, { ok: true })
+        }
+
+        return jsonResponse(405, { error: 'Method not allowed' })
       }
 
       if (url.pathname === '/codex-api/servers') {

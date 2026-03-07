@@ -546,6 +546,10 @@ function toServerKey(serverId: string): string {
   return normalized.length > 0 ? normalized : '__default__'
 }
 
+function toScopedProjectKey(serverId: string, projectName: string): string {
+  return `${toServerKey(serverId)}::${projectName.trim()}`
+}
+
 const selectedServerKey = computed(() => {
   const selected = props.selectedServerId.trim()
   if (selected.length > 0) {
@@ -718,7 +722,7 @@ function expandAllFolders(): void {
   const nextCollapsedProjects = { ...collapsedProjects.value }
   const nextExpandedProjects = { ...expandedProjects.value }
   for (const group of props.groups) {
-    nextCollapsedProjects[group.projectName] = false
+    nextCollapsedProjects[toScopedProjectKey(props.selectedServerId, group.projectName)] = false
     nextExpandedProjects[group.projectName] = true
   }
   collapsedProjects.value = nextCollapsedProjects
@@ -735,7 +739,7 @@ function collapseAllFolders(): void {
   const nextCollapsedProjects = { ...collapsedProjects.value }
   const nextExpandedProjects = { ...expandedProjects.value }
   for (const group of props.groups) {
-    nextCollapsedProjects[group.projectName] = true
+    nextCollapsedProjects[toScopedProjectKey(props.selectedServerId, group.projectName)] = true
     nextExpandedProjects[group.projectName] = false
   }
   collapsedProjects.value = nextCollapsedProjects
@@ -842,7 +846,7 @@ function isExpanded(projectName: string): boolean {
 }
 
 function isCollapsed(projectName: string): boolean {
-  return collapsedProjects.value[projectName] === true
+  return collapsedProjects.value[toScopedProjectKey(props.selectedServerId, projectName)] === true
 }
 
 function toggleProjectExpansion(projectName: string): void {
@@ -858,9 +862,10 @@ function toggleProjectCollapse(projectName: string): void {
     return
   }
 
+  const scopedProjectKey = toScopedProjectKey(props.selectedServerId, projectName)
   collapsedProjects.value = {
     ...collapsedProjects.value,
-    [projectName]: !isCollapsed(projectName),
+    [scopedProjectKey]: !isCollapsed(projectName),
   }
 }
 

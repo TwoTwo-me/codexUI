@@ -47,6 +47,7 @@ const SELECTED_THREAD_STORAGE_KEY = 'codex-web-local.selected-thread-id.v1'
 const SELECTED_SERVER_STORAGE_KEY = 'codex-web-local.selected-server-id.v1'
 const PROJECT_ORDER_STORAGE_KEY = 'codex-web-local.project-order.v1'
 const PROJECT_DISPLAY_NAME_STORAGE_KEY = 'codex-web-local.project-display-name.v1'
+const DEFAULT_SERVER_STORAGE_SUFFIX = '__default__'
 const AUTO_REFRESH_ENABLED_STORAGE_KEY = 'codex-web-local.auto-refresh-enabled.v1'
 const EVENT_SYNC_DEBOUNCE_MS = 220
 const AUTO_REFRESH_INTERVAL_MS = 4000
@@ -165,11 +166,25 @@ function saveSelectedServerId(serverId: string): void {
   window.localStorage.setItem(SELECTED_SERVER_STORAGE_KEY, serverId)
 }
 
-function loadProjectOrder(): string[] {
+
+function toServerStorageSuffix(serverId: string): string {
+  const normalized = serverId.trim()
+  return normalized.length > 0 ? normalized : DEFAULT_SERVER_STORAGE_SUFFIX
+}
+
+function getProjectOrderStorageKey(serverId: string): string {
+  return `${PROJECT_ORDER_STORAGE_KEY}:${toServerStorageSuffix(serverId)}`
+}
+
+function getProjectDisplayNameStorageKey(serverId: string): string {
+  return `${PROJECT_DISPLAY_NAME_STORAGE_KEY}:${toServerStorageSuffix(serverId)}`
+}
+
+function loadProjectOrder(serverId: string): string[] {
   if (typeof window === 'undefined') return []
 
   try {
-    const raw = window.localStorage.getItem(PROJECT_ORDER_STORAGE_KEY)
+    const raw = window.localStorage.getItem(getProjectOrderStorageKey(serverId))
     if (!raw) return []
 
     const parsed = JSON.parse(raw) as unknown
@@ -186,16 +201,16 @@ function loadProjectOrder(): string[] {
   }
 }
 
-function saveProjectOrder(order: string[]): void {
+function saveProjectOrder(serverId: string, order: string[]): void {
   if (typeof window === 'undefined') return
-  window.localStorage.setItem(PROJECT_ORDER_STORAGE_KEY, JSON.stringify(order))
+  window.localStorage.setItem(getProjectOrderStorageKey(serverId), JSON.stringify(order))
 }
 
-function loadProjectDisplayNames(): Record<string, string> {
+function loadProjectDisplayNames(serverId: string): Record<string, string> {
   if (typeof window === 'undefined') return {}
 
   try {
-    const raw = window.localStorage.getItem(PROJECT_DISPLAY_NAME_STORAGE_KEY)
+    const raw = window.localStorage.getItem(getProjectDisplayNameStorageKey(serverId))
     if (!raw) return {}
 
     const parsed = JSON.parse(raw) as unknown
@@ -213,9 +228,9 @@ function loadProjectDisplayNames(): Record<string, string> {
   }
 }
 
-function saveProjectDisplayNames(displayNames: Record<string, string>): void {
+function saveProjectDisplayNames(serverId: string, displayNames: Record<string, string>): void {
   if (typeof window === 'undefined') return
-  window.localStorage.setItem(PROJECT_DISPLAY_NAME_STORAGE_KEY, JSON.stringify(displayNames))
+  window.localStorage.setItem(getProjectDisplayNameStorageKey(serverId), JSON.stringify(displayNames))
 }
 
 function mergeProjectOrder(previousOrder: string[], incomingGroups: UiProjectGroup[]): string[] {
@@ -693,8 +708,8 @@ export function useDesktopState() {
   const selectedReasoningEffort = ref<ReasoningEffort | ''>('medium')
   const readStateByThreadId = ref<Record<string, string>>(loadReadStateMap())
   const scrollStateByThreadId = ref<Record<string, ThreadScrollState>>(loadThreadScrollStateMap())
-  const projectOrder = ref<string[]>(loadProjectOrder())
-  const projectDisplayNameById = ref<Record<string, string>>(loadProjectDisplayNames())
+  const projectOrder = ref<string[]>(loadProjectOrder(selectedServerId.value))
+  const projectDisplayNameById = ref<Record<string, string>>(loadProjectDisplayNames(selectedServerId.value))
   const loadedVersionByThreadId = ref<Record<string, string>>({})
   const loadedMessagesByThreadId = ref<Record<string, boolean>>({})
   const resumedThreadById = ref<Record<string, boolean>>({})
@@ -796,6 +811,9 @@ export function useDesktopState() {
     if (changed) {
       selectedServerId.value = normalizedServerId
       saveSelectedServerId(normalizedServerId)
+      projectOrder.value = loadProjectOrder(normalizedServerId)
+      projectDisplayNameById.value = loadProjectDisplayNames(normalizedServerId)
+      hasHydratedWorkspaceRootsState = false
     }
     setGatewayActiveServerId(normalizedServerId)
     return changed
@@ -973,7 +991,7 @@ export function useDesktopState() {
     const nextProjectOrder = mergeProjectOrder(projectOrder.value, sourceGroups.value)
     if (!areStringArraysEqual(projectOrder.value, nextProjectOrder)) {
       projectOrder.value = nextProjectOrder
-      saveProjectOrder(projectOrder.value)
+      saveProjectOrder(selectedServerId.value, projectOrder.value)
     }
     applyThreadFlags()
   }
@@ -1896,7 +1914,7 @@ export function useDesktopState() {
         const mergedOrder = mergeProjectOrder(hydratedOrder, groups)
         if (!areStringArraysEqual(projectOrder.value, mergedOrder)) {
           projectOrder.value = mergedOrder
-          saveProjectOrder(projectOrder.value)
+          saveProjectOrder(selectedServerId.value, projectOrder.value)
         }
       }
 
@@ -1911,7 +1929,7 @@ export function useDesktopState() {
         }
         if (changed) {
           projectDisplayNameById.value = nextLabels
-          saveProjectDisplayNames(nextLabels)
+          saveProjectDisplayNames(selectedServerId.value, nextLabels)
         }
       }
     } catch {
@@ -1959,7 +1977,7 @@ export function useDesktopState() {
       const nextProjectOrder = mergeProjectOrder(projectOrder.value, groups)
       if (!areStringArraysEqual(projectOrder.value, nextProjectOrder)) {
         projectOrder.value = nextProjectOrder
-        saveProjectOrder(projectOrder.value)
+        saveProjectOrder(selectedServerId.value, projectOrder.value)
       }
 
       const orderedGroups = orderGroupsByProjectOrder(groups, projectOrder.value)
@@ -2349,7 +2367,7 @@ export function useDesktopState() {
       ...projectDisplayNameById.value,
       [projectName]: displayName,
     }
-    saveProjectDisplayNames(projectDisplayNameById.value)
+    saveProjectDisplayNames(selectedServerId.value, projectDisplayNameById.value)
   }
 
   function removeProject(projectName: string): void {
@@ -2358,7 +2376,7 @@ export function useDesktopState() {
     const nextProjectOrder = projectOrder.value.filter((name) => name !== projectName)
     if (!areStringArraysEqual(projectOrder.value, nextProjectOrder)) {
       projectOrder.value = nextProjectOrder
-      saveProjectOrder(projectOrder.value)
+      saveProjectOrder(selectedServerId.value, projectOrder.value)
     }
 
     sourceGroups.value = sourceGroups.value.filter((group) => group.projectName !== projectName)
@@ -2367,7 +2385,7 @@ export function useDesktopState() {
       const nextDisplayNames = { ...projectDisplayNameById.value }
       delete nextDisplayNames[projectName]
       projectDisplayNameById.value = nextDisplayNames
-      saveProjectDisplayNames(nextDisplayNames)
+      saveProjectDisplayNames(selectedServerId.value, nextDisplayNames)
     }
 
     applyThreadFlags()
@@ -2397,7 +2415,7 @@ export function useDesktopState() {
 
     const normalizedProjectOrder = mergeProjectOrder(reorderedVisibleOrder, sourceGroups.value)
     projectOrder.value = normalizedProjectOrder
-    saveProjectOrder(projectOrder.value)
+    saveProjectOrder(selectedServerId.value, projectOrder.value)
 
     const orderedGroups = orderGroupsByProjectOrder(sourceGroups.value, projectOrder.value)
     sourceGroups.value = mergeThreadGroups(sourceGroups.value, orderedGroups)
@@ -2411,7 +2429,7 @@ export function useDesktopState() {
     const nextOrder = [normalizedName, ...projectOrder.value.filter((name) => name !== normalizedName)]
     if (areStringArraysEqual(projectOrder.value, nextOrder)) return
     projectOrder.value = nextOrder
-    saveProjectOrder(projectOrder.value)
+    saveProjectOrder(selectedServerId.value, projectOrder.value)
 
     const orderedGroups = orderGroupsByProjectOrder(sourceGroups.value, projectOrder.value)
     sourceGroups.value = mergeThreadGroups(sourceGroups.value, orderedGroups)

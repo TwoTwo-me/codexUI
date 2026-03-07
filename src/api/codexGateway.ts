@@ -452,8 +452,17 @@ function normalizeWorkspaceRootsState(payload: unknown): WorkspaceRootsState {
   }
 }
 
+
+function buildServerScopedPath(path: string): string {
+  const serverId = activeServerId.trim()
+  if (!serverId) return path
+  const url = new URL(path, 'http://localhost')
+  url.searchParams.set('serverId', serverId)
+  return `${url.pathname}${url.search}`
+}
+
 export async function getWorkspaceRootsState(): Promise<WorkspaceRootsState> {
-  const response = await fetch('/codex-api/workspace-roots-state')
+  const response = await fetch(buildServerScopedPath('/codex-api/workspace-roots-state'))
   const payload = (await response.json()) as unknown
   if (!response.ok) {
     throw new Error('Failed to load workspace roots state')
@@ -466,7 +475,7 @@ export async function getWorkspaceRootsState(): Promise<WorkspaceRootsState> {
 }
 
 export async function setWorkspaceRootsState(nextState: WorkspaceRootsState): Promise<void> {
-  const response = await fetch('/codex-api/workspace-roots-state', {
+  const response = await fetch(buildServerScopedPath('/codex-api/workspace-roots-state'), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(nextState),
@@ -477,7 +486,7 @@ export async function setWorkspaceRootsState(nextState: WorkspaceRootsState): Pr
 }
 
 export async function openProjectRoot(path: string, options?: { createIfMissing?: boolean; label?: string }): Promise<string> {
-  const response = await fetch('/codex-api/project-root', {
+  const response = await fetch(buildServerScopedPath('/codex-api/project-root'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

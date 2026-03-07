@@ -515,6 +515,8 @@ const SERVER_REGISTRY_STATE_KEY = 'codexui-server-registry'
 const SERVER_REGISTRY_STATE_BY_USER_KEY = 'codexui-server-registry-by-user'
 const CONNECTOR_REGISTRY_STATE_KEY = 'codexui-connector-registry'
 const CONNECTOR_REGISTRY_STATE_BY_USER_KEY = 'codexui-connector-registry-by-user'
+const WORKSPACE_ROOTS_STATE_BY_SCOPE_KEY = 'codexui-workspace-roots-state-by-scope'
+const WORKSPACE_ROOTS_STATE_DEFAULT_SERVER_KEY = '__default__'
 const MAX_SERVER_ID_LENGTH = 64
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 const CONNECTOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
@@ -1818,40 +1820,69 @@ async function writeThreadTitleCache(cache: ThreadTitleCache): Promise<void> {
   await writeFile(statePath, JSON.stringify(payload), 'utf8')
 }
 
-async function readWorkspaceRootsState(): Promise<WorkspaceRootsState> {
-  const statePath = getCodexGlobalStatePath()
-  let payload: Record<string, unknown> = {}
 
-  try {
-    const raw = await readFile(statePath, 'utf8')
-    const parsed = JSON.parse(raw) as unknown
-    payload = asRecord(parsed) ?? {}
-  } catch {
-    payload = {}
-  }
-
+function normalizeWorkspaceRootsState(value: unknown): WorkspaceRootsState {
+  const record = asRecord(value)
   return {
-    order: normalizeStringArray(payload['electron-saved-workspace-roots']),
-    labels: normalizeStringRecord(payload['electron-workspace-root-labels']),
-    active: normalizeStringArray(payload['active-workspace-roots']),
+    order: normalizeStringArray(record?.order),
+    labels: normalizeStringRecord(record?.labels),
+    active: normalizeStringArray(record?.active),
   }
 }
 
-async function writeWorkspaceRootsState(nextState: WorkspaceRootsState): Promise<void> {
-  const statePath = getCodexGlobalStatePath()
-  let payload: Record<string, unknown> = {}
-  try {
-    const raw = await readFile(statePath, 'utf8')
-    payload = asRecord(JSON.parse(raw)) ?? {}
-  } catch {
-    payload = {}
+function getWorkspaceRootsServerKey(serverId: string | null): string {
+  const normalized = serverId?.trim() ?? ''
+  return normalized.length > 0 ? normalized : WORKSPACE_ROOTS_STATE_DEFAULT_SERVER_KEY
+}
+
+function readWorkspaceRootsStateFromPayload(
+  payload: Record<string, unknown>,
+  scope: ServerRegistryScope,
+  serverId: string | null,
+): WorkspaceRootsState {
+  const serverKey = getWorkspaceRootsServerKey(serverId)
+  const perScopePayload = asRecord(payload[WORKSPACE_ROOTS_STATE_BY_SCOPE_KEY])
+  const scopedPayload = perScopePayload ? asRecord(perScopePayload[scope.cacheKey]) : null
+  const scopedValue = scopedPayload ? scopedPayload[serverKey] : undefined
+  if (scopedValue !== undefined) {
+    return normalizeWorkspaceRootsState(scopedValue)
   }
 
-  payload['electron-saved-workspace-roots'] = normalizeStringArray(nextState.order)
-  payload['electron-workspace-root-labels'] = normalizeStringRecord(nextState.labels)
-  payload['active-workspace-roots'] = normalizeStringArray(nextState.active)
+  if (!scope.userId) {
+    return {
+      order: normalizeStringArray(payload['electron-saved-workspace-roots']),
+      labels: normalizeStringRecord(payload['electron-workspace-root-labels']),
+      active: normalizeStringArray(payload['active-workspace-roots']),
+    }
+  }
 
-  await writeFile(statePath, JSON.stringify(payload), 'utf8')
+  return {
+    order: [],
+    labels: {},
+    active: [],
+  }
+}
+
+async function readWorkspaceRootsState(
+  scope: ServerRegistryScope,
+  serverId: string | null,
+): Promise<WorkspaceRootsState> {
+  const payload = await readCodexGlobalStatePayload()
+  return readWorkspaceRootsStateFromPayload(payload, scope, serverId)
+}
+
+async function writeWorkspaceRootsState(
+  scope: ServerRegistryScope,
+  serverId: string | null,
+  nextState: WorkspaceRootsState,
+): Promise<void> {
+  const payload = await readCodexGlobalStatePayload()
+  const perScopePayload = asRecord(payload[WORKSPACE_ROOTS_STATE_BY_SCOPE_KEY]) ?? {}
+  const scopedPayload = asRecord(perScopePayload[scope.cacheKey]) ?? {}
+  scopedPayload[getWorkspaceRootsServerKey(serverId)] = normalizeWorkspaceRootsState(nextState)
+  perScopePayload[scope.cacheKey] = scopedPayload
+  payload[WORKSPACE_ROOTS_STATE_BY_SCOPE_KEY] = perScopePayload
+  await writeCodexGlobalStatePayload(payload)
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -3422,7 +3453,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       }
 
       if (req.method === 'GET' && url.pathname === '/codex-api/workspace-roots-state') {
-        const state = await readWorkspaceRootsState()
+        const state = await readWorkspaceRootsState(registryScope, getRequestedServerId(req, url))
         setJson(res, 200, { data: state })
         return
       }
@@ -3439,7 +3470,7 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           labels: normalizeStringRecord(record.labels),
           active: normalizeStringArray(record.active),
         }
-        await writeWorkspaceRootsState(nextState)
+        await writeWorkspaceRootsState(registryScope, getRequestedServerId(req, url), nextState)
         setJson(res, 200, { ok: true })
         return
       }
@@ -3476,14 +3507,15 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
           return
         }
 
-        const existingState = await readWorkspaceRootsState()
+        const requestedServerId = getRequestedServerId(req, url)
+        const existingState = await readWorkspaceRootsState(registryScope, requestedServerId)
         const nextOrder = [normalizedPath, ...existingState.order.filter((item) => item !== normalizedPath)]
         const nextActive = [normalizedPath, ...existingState.active.filter((item) => item !== normalizedPath)]
         const nextLabels = { ...existingState.labels }
         if (label.trim().length > 0) {
           nextLabels[normalizedPath] = label.trim()
         }
-        await writeWorkspaceRootsState({
+        await writeWorkspaceRootsState(registryScope, requestedServerId, {
           order: nextOrder,
           labels: nextLabels,
           active: nextActive,
