@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -838,7 +838,11 @@ async function runCli(argv: string[]): Promise<void> {
 function isMainModule(): boolean {
   const entrypoint = process.argv[1]
   if (!entrypoint) return false
-  return fileURLToPath(import.meta.url) === entrypoint
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(entrypoint)
+  } catch {
+    return fileURLToPath(import.meta.url) === entrypoint
+  }
 }
 
 export { CodexRelayConnector } from './core.js'

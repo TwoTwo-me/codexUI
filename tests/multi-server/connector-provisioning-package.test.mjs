@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -271,6 +271,31 @@ test('connector install CLI accepts inline bootstrap token when a token file is 
       })
     })
   }
+})
+
+test('connector CLI runs when invoked through a symlinked bin path', async () => {
+  const connectorEntrypoint = resolve(repoDir, 'dist-cli/connector.js')
+  const tempDir = await mkdtemp(resolve(tmpdir(), 'codexui-bin-link-'))
+  const linkPath = resolve(tempDir, 'codexui-connector')
+  await symlink(connectorEntrypoint, linkPath)
+
+  const result = spawnSync(
+    linkPath,
+    ['--help'],
+    {
+      cwd: repoDir,
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+      },
+      encoding: 'utf8',
+    },
+  )
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stdout, /Usage: codexui-connector/i)
+  assert.match(result.stdout, /install/i)
+  assert.match(result.stdout, /connect/i)
 })
 
 test('connector package exchanges a bootstrap token and rewrites the token file with the durable credential', async () => {
