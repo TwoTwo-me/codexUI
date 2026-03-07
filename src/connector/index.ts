@@ -100,6 +100,39 @@ async function parseJsonResponse(response: Response): Promise<unknown> {
   }
 }
 
+function parseRetryAfterMs(response: Response, payload: unknown): number | undefined {
+  const retryAfterHeader = response.headers.get('Retry-After')
+  if (retryAfterHeader) {
+    const numeric = Number(retryAfterHeader)
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return Math.max(1_000, Math.trunc(numeric * 1000))
+    }
+  }
+
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const retryAfterSeconds = (payload as Record<string, unknown>).retryAfterSeconds
+    if (typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+      return Math.max(1_000, Math.trunc(retryAfterSeconds * 1000))
+    }
+  }
+
+  return undefined
+}
+
+function createRelayHttpError(response: Response, payload: unknown, fallback: string): Error {
+  const error = new Error(createHttpErrorMessage(payload, fallback)) as Error & {
+    statusCode?: number
+    retryAfterMs?: number
+  }
+  error.name = 'RelayHttpError'
+  error.statusCode = response.status
+  const retryAfterMs = parseRetryAfterMs(response, payload)
+  if (retryAfterMs !== undefined) {
+    error.retryAfterMs = retryAfterMs
+  }
+  return error
+}
+
 function buildAuthorizationHeader(token: string): Record<string, string> {
   return {
     Authorization: `Bearer ${token}`,
@@ -128,7 +161,7 @@ export class HttpRelayHubTransport implements RelayConnectorTransport {
     })
     const payload = await parseJsonResponse(response)
     if (!response.ok) {
-      throw new Error(createHttpErrorMessage(payload, `Relay connect failed with HTTP ${String(response.status)}`))
+      throw createRelayHttpError(response, payload, `Relay connect failed with HTTP ${String(response.status)}`)
     }
     const data = payload && typeof payload === 'object' && !Array.isArray(payload)
       ? (payload as Record<string, unknown>).data as Record<string, unknown>
@@ -158,7 +191,7 @@ export class HttpRelayHubTransport implements RelayConnectorTransport {
     })
     const payload = await parseJsonResponse(response)
     if (!response.ok) {
-      throw new Error(createHttpErrorMessage(payload, `Relay pull failed with HTTP ${String(response.status)}`))
+      throw createRelayHttpError(response, payload, `Relay pull failed with HTTP ${String(response.status)}`)
     }
     const data = payload && typeof payload === 'object' && !Array.isArray(payload)
       ? (payload as Record<string, unknown>).data as Record<string, unknown>
@@ -179,7 +212,7 @@ export class HttpRelayHubTransport implements RelayConnectorTransport {
     })
     const payload = await parseJsonResponse(response)
     if (!response.ok) {
-      throw new Error(createHttpErrorMessage(payload, `Relay push failed with HTTP ${String(response.status)}`))
+      throw createRelayHttpError(response, payload, `Relay push failed with HTTP ${String(response.status)}`)
     }
   }
 }

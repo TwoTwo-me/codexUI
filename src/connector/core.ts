@@ -51,6 +51,7 @@ export type RelayConnectorOptions = {
   relayE2ee?: RelayConnectorE2eeConfig
   pollWaitMs?: number
   reconnectDelayMs?: number
+  notificationFlushDelayMs?: number
   onLog?: (level: RelayConnectorLogLevel, message: string) => void
 }
 
@@ -66,6 +67,19 @@ function wait(ms: number): Promise<void> {
   })
 }
 
+function asRateLimitError(error: unknown): { message: string; retryAfterMs?: number } | null {
+  if (!(error instanceof Error)) return null
+  const statusCode = (error as Error & { statusCode?: unknown }).statusCode
+  if (statusCode !== 429) return null
+  const retryAfterMs = (error as Error & { retryAfterMs?: unknown }).retryAfterMs
+  return {
+    message: error.message,
+    ...(typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs > 0
+      ? { retryAfterMs }
+      : {}),
+  }
+}
+
 export class CodexRelayConnector {
   private readonly token: string
   private readonly transport: RelayConnectorTransport
@@ -73,11 +87,13 @@ export class CodexRelayConnector {
   private readonly relayE2ee?: RelayConnectorE2eeConfig
   private readonly pollWaitMs: number
   private readonly reconnectDelayMs: number
+  private readonly notificationFlushDelayMs: number
   private readonly connectorId: string
   private readonly onLog?: (level: RelayConnectorLogLevel, message: string) => void
   private readonly pendingMessages: Array<RelayResponseEnvelope | RelayEventEnvelope> = []
   private readonly unsubscribeNotificationListener: () => void
   private flushPromise: Promise<void> | null = null
+  private notificationFlushTimer: ReturnType<typeof setTimeout> | null = null
   private sessionId = ''
   private activeRoute: RelayRequestEnvelope['route'] | null = null
   private stopped = false
@@ -93,6 +109,9 @@ export class CodexRelayConnector {
     this.reconnectDelayMs = typeof options.reconnectDelayMs === 'number' && Number.isFinite(options.reconnectDelayMs)
       ? Math.max(1_000, Math.trunc(options.reconnectDelayMs))
       : 3_000
+    this.notificationFlushDelayMs = typeof options.notificationFlushDelayMs === 'number' && Number.isFinite(options.notificationFlushDelayMs)
+      ? Math.max(0, Math.trunc(options.notificationFlushDelayMs))
+      : 250
     this.connectorId = options.connectorId?.trim() || 'connector'
     this.onLog = options.onLog
     this.unsubscribeNotificationListener = this.appServer.onNotification((notification) => {
@@ -119,6 +138,11 @@ export class CodexRelayConnector {
   }
 
   async flushPendingMessages(): Promise<void> {
+    if (this.notificationFlushTimer) {
+      clearTimeout(this.notificationFlushTimer)
+      this.notificationFlushTimer = null
+    }
+
     if (!this.sessionId || this.pendingMessages.length === 0) {
       return
     }
@@ -152,6 +176,16 @@ export class CodexRelayConnector {
       try {
         await this.pollOnce()
       } catch (error) {
+        const rateLimit = asRateLimitError(error)
+        if (rateLimit) {
+          const retryAfterMs = rateLimit.retryAfterMs ?? this.reconnectDelayMs
+          const retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000))
+          this.log('warn', `${rateLimit.message} Retrying in ${String(retryAfterSeconds)}s.`)
+          if (this.stopped) break
+          await wait(retryAfterMs)
+          continue
+        }
+
         const message = error instanceof Error ? error.message : 'Unknown connector error'
         this.log('error', `Connector loop failed: ${message}`)
         this.sessionId = ''
@@ -164,6 +198,10 @@ export class CodexRelayConnector {
   dispose(): void {
     this.stopped = true
     this.sessionId = ''
+    if (this.notificationFlushTimer) {
+      clearTimeout(this.notificationFlushTimer)
+      this.notificationFlushTimer = null
+    }
     this.unsubscribeNotificationListener()
     this.appServer.dispose?.()
   }
@@ -232,12 +270,24 @@ export class CodexRelayConnector {
       this.pendingMessages.push(this.buildEvent(notification.method, notification.params ?? null))
     }
 
-    try {
-      await this.flushPendingMessages()
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to push local notification'
-      this.log('warn', message)
+    this.scheduleNotificationFlush()
+  }
+
+  private scheduleNotificationFlush(): void {
+    if (this.stopped || this.notificationFlushTimer || this.flushPromise) {
+      return
     }
+
+    this.notificationFlushTimer = setTimeout(() => {
+      this.notificationFlushTimer = null
+      void this.flushPendingMessages().catch((error) => {
+        const message = error instanceof Error ? error.message : 'Failed to push local notification'
+        this.log('warn', message)
+        if (!this.stopped && this.pendingMessages.length > 0) {
+          this.scheduleNotificationFlush()
+        }
+      })
+    }, this.notificationFlushDelayMs)
   }
 
   private buildResponse(
