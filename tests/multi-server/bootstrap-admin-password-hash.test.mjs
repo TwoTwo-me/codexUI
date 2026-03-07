@@ -190,7 +190,8 @@ test('hash-password CLI emits a bootstrap admin password hash and env assignment
   assert.notEqual(rawHash, 'cli-secret-pass-1')
 
   const envLine = await generatePasswordHash('cli-secret-pass-1', { envOutput: true })
-  assert.match(envLine, /^CODEXUI_ADMIN_PASSWORD_HASH=scrypt\$/u)
+  assert.match(envLine, /^CODEXUI_ADMIN_PASSWORD_HASH=scrypt\$\$/u)
+  assert.match(envLine, /\$\$/u)
   assert.notEqual(envLine, `CODEXUI_ADMIN_PASSWORD_HASH=cli-secret-pass-1`)
 })
 

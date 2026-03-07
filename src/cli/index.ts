@@ -111,6 +111,10 @@ function normalizeEnvSecret(name: string): string | undefined {
   return value && value.length > 0 ? value : undefined
 }
 
+function escapeForComposeEnv(value: string): string {
+  return value.replace(/\$/gu, '$$$$')
+}
+
 function assertSupportedPasswordHash(passwordHash: string, sourceLabel: string): void {
   if (!isSupportedPasswordHash(passwordHash)) {
     throw new Error(`${sourceLabel} is not a supported password hash.`)
@@ -383,7 +387,7 @@ async function runHashPassword(options: { password?: string; passwordStdin?: boo
   }
 
   const passwordHash = await createPasswordHash(password)
-  console.log(options.env ? `CODEXUI_ADMIN_PASSWORD_HASH=${passwordHash}` : passwordHash)
+  console.log(options.env ? `CODEXUI_ADMIN_PASSWORD_HASH=${escapeForComposeEnv(passwordHash)}` : passwordHash)
 }
 
 program

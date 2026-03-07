@@ -79,10 +79,12 @@ npm run admin:hash-password
 The helper prints:
 
 ```dotenv
-CODEXUI_ADMIN_PASSWORD_HASH=scrypt$...
+CODEXUI_ADMIN_PASSWORD_HASH=scrypt$$...
 ```
 
 Paste that into `.env`, then remove or blank `CODEXUI_ADMIN_PASSWORD`.
+
+The helper already escapes `$` as `$$`, so the output is safe to paste directly into `docker compose`-managed `.env` files.
 
 ### Credential precedence
 

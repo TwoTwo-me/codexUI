@@ -62,8 +62,10 @@ unset PW
 That prints:
 
 ```dotenv
-CODEXUI_ADMIN_PASSWORD_HASH=scrypt$...
+CODEXUI_ADMIN_PASSWORD_HASH=scrypt$$...
 ```
+
+`--env` output is already escaped for Docker Compose, so you can paste it into `.env` directly.
 
 ### 2. Edit `.env`
 
