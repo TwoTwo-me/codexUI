@@ -8,20 +8,56 @@ fi
 HOST="${CODEXUI_BIND_HOST:-0.0.0.0}"
 PORT="${CODEXUI_PORT:-4300}"
 USERNAME="${CODEXUI_ADMIN_USERNAME:-admin}"
+PASSWORD_HASH_FILE="${CODEXUI_ADMIN_PASSWORD_HASH_FILE:-}"
+PASSWORD_HASH_ENV="${CODEXUI_ADMIN_PASSWORD_HASH:-}"
 PASSWORD_FILE="${CODEXUI_ADMIN_PASSWORD_FILE:-}"
+PASSWORD_ENV="${CODEXUI_ADMIN_PASSWORD:-}"
 
-if [ -n "$PASSWORD_FILE" ]; then
-  if [ ! -f "$PASSWORD_FILE" ]; then
-    echo "[codexui-entrypoint] CODEXUI_ADMIN_PASSWORD_FILE does not exist: $PASSWORD_FILE" >&2
+read_secret_file() {
+  secret_file="$1"
+  if [ ! -f "$secret_file" ]; then
+    echo "[codexui-entrypoint] Secret file does not exist: $secret_file" >&2
     exit 1
   fi
-  PASSWORD="$(cat "$PASSWORD_FILE")"
-else
-  PASSWORD="${CODEXUI_ADMIN_PASSWORD:-}"
+  tr -d '\r\n' < "$secret_file"
+}
+
+hash_sources=0
+plaintext_sources=0
+[ -n "$PASSWORD_HASH_FILE" ] && hash_sources=$((hash_sources + 1))
+[ -n "$PASSWORD_HASH_ENV" ] && hash_sources=$((hash_sources + 1))
+[ -n "$PASSWORD_FILE" ] && plaintext_sources=$((plaintext_sources + 1))
+[ -n "$PASSWORD_ENV" ] && plaintext_sources=$((plaintext_sources + 1))
+
+if [ "$hash_sources" -gt 1 ]; then
+  echo "[codexui-entrypoint] Configure only one of CODEXUI_ADMIN_PASSWORD_HASH or CODEXUI_ADMIN_PASSWORD_HASH_FILE." >&2
+  exit 1
 fi
 
-if [ -z "$PASSWORD" ]; then
-  echo "[codexui-entrypoint] Set CODEXUI_ADMIN_PASSWORD (or CODEXUI_ADMIN_PASSWORD_FILE) before starting the hub." >&2
+if [ "$plaintext_sources" -gt 1 ]; then
+  echo "[codexui-entrypoint] Configure only one of CODEXUI_ADMIN_PASSWORD or CODEXUI_ADMIN_PASSWORD_FILE." >&2
+  exit 1
+fi
+
+if [ "$hash_sources" -gt 0 ] && [ "$plaintext_sources" -gt 0 ]; then
+  echo "[codexui-entrypoint] Bootstrap admin password hash settings cannot be combined with plaintext password settings." >&2
+  exit 1
+fi
+
+PASSWORD_HASH=""
+PASSWORD=""
+if [ -n "$PASSWORD_HASH_FILE" ]; then
+  PASSWORD_HASH="$(read_secret_file "$PASSWORD_HASH_FILE")"
+elif [ -n "$PASSWORD_HASH_ENV" ]; then
+  PASSWORD_HASH="$PASSWORD_HASH_ENV"
+elif [ -n "$PASSWORD_FILE" ]; then
+  PASSWORD="$(read_secret_file "$PASSWORD_FILE")"
+else
+  PASSWORD="$PASSWORD_ENV"
+fi
+
+if [ -z "$PASSWORD_HASH" ] && [ -z "$PASSWORD" ]; then
+  echo "[codexui-entrypoint] Set one of CODEXUI_ADMIN_PASSWORD_HASH(_FILE) or CODEXUI_ADMIN_PASSWORD(_FILE) before starting the hub." >&2
   exit 1
 fi
 
@@ -32,8 +68,15 @@ if [ ! -s "${CODEX_HOME:-/data/codex-home}/auth.json" ]; then
   echo "[codexui-entrypoint] Remote Connectors will still work; local Hub-hosted Codex runtimes require copied auth data." >&2
 fi
 
-exec node dist-cli/index.js \
+set -- node dist-cli/index.js \
   --host "$HOST" \
   --port "$PORT" \
-  --username "$USERNAME" \
-  --password "$PASSWORD"
+  --username "$USERNAME"
+
+if [ -n "$PASSWORD_HASH" ]; then
+  set -- "$@" --password-hash "$PASSWORD_HASH"
+else
+  set -- "$@" --password "$PASSWORD"
+fi
+
+exec "$@"

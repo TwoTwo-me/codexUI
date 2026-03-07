@@ -9,6 +9,7 @@ const distDir = join(__dirname, '..', 'dist')
 
 export type ServerOptions = {
   password?: string
+  passwordHash?: string
   bootstrapAdminUsername?: string
 }
 
@@ -45,10 +46,11 @@ export function createServer(options: ServerOptions = {}): ServerInstance {
   const app = express()
   const bridge = createCodexBridgeMiddleware()
 
-  // 1. Auth middleware (if password is set)
-  if (options.password) {
+  // 1. Auth middleware (if a bootstrap credential is set)
+  if (options.password || options.passwordHash) {
     app.use(createAuthMiddleware({
       bootstrapAdminPassword: options.password,
+      bootstrapAdminPasswordHash: options.passwordHash,
       bootstrapAdminUsername: options.bootstrapAdminUsername,
     }))
   }

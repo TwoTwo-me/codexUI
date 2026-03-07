@@ -60,6 +60,10 @@ export type UserProfile = {
   lastLoginAtIso?: string
 }
 
+export type BootstrapAdminCredential =
+  | { password: string; passwordHash?: never }
+  | { password?: never; passwordHash: string }
+
 export class UserStoreError extends Error {
   readonly code: string
   readonly statusCode: number
@@ -256,14 +260,23 @@ async function hashPassword(password: string): Promise<string> {
   return `${HASH_ALGORITHM}$${params}$${salt.toString('base64url')}$${derived.toString('base64url')}`
 }
 
-async function verifyPassword(password: string, encodedHash: string): Promise<boolean> {
+export async function createPasswordHash(password: string): Promise<string> {
+  return hashPassword(password)
+}
+
+function parsePasswordHash(encodedHash: string): {
+  algorithm: string
+  params: { N: number; r: number; p: number }
+  salt: Buffer
+  expected: Buffer
+} | null {
   const [algorithm, paramsRaw, saltRaw, expectedRaw] = encodedHash.split('$')
   if (algorithm !== HASH_ALGORITHM || !paramsRaw || !saltRaw || !expectedRaw) {
-    return false
+    return null
   }
 
   const params = parseScryptParams(paramsRaw)
-  if (!params) return false
+  if (!params) return null
 
   let salt: Buffer
   let expected: Buffer
@@ -271,23 +284,41 @@ async function verifyPassword(password: string, encodedHash: string): Promise<bo
     salt = Buffer.from(saltRaw, 'base64url')
     expected = Buffer.from(expectedRaw, 'base64url')
   } catch {
-    return false
+    return null
   }
 
   if (salt.length === 0 || expected.length === 0) {
+    return null
+  }
+
+  return {
+    algorithm,
+    params,
+    salt,
+    expected,
+  }
+}
+
+export function isSupportedPasswordHash(encodedHash: string): boolean {
+  return parsePasswordHash(encodedHash) !== null
+}
+
+async function verifyPassword(password: string, encodedHash: string): Promise<boolean> {
+  const parsed = parsePasswordHash(encodedHash)
+  if (!parsed) {
     return false
   }
 
-  const derived = await scrypt(password, salt, expected.length, {
-    ...params,
+  const derived = await scrypt(password, parsed.salt, parsed.expected.length, {
+    ...parsed.params,
     maxmem: DEFAULT_SCRYPT_PARAMS.maxmem,
   })
   const actual = derived
 
-  if (actual.length !== expected.length) {
+  if (actual.length !== parsed.expected.length) {
     return false
   }
-  return timingSafeEqual(actual, expected)
+  return timingSafeEqual(actual, parsed.expected)
 }
 
 function assertValidUsername(username: string): void {
@@ -310,6 +341,36 @@ function assertNonEmptyPassword(password: string): void {
   if (!password) {
     throw new UserStoreError('invalid_password', 'Password cannot be empty.', 400)
   }
+}
+
+function normalizeBootstrapAdminCredential(
+  credential: string | BootstrapAdminCredential,
+): BootstrapAdminCredential {
+  if (typeof credential === 'string') {
+    assertNonEmptyPassword(credential)
+    return { password: credential }
+  }
+
+  const password = typeof credential.password === 'string' ? credential.password : ''
+  const passwordHash = typeof credential.passwordHash === 'string' ? credential.passwordHash.trim() : ''
+
+  if (password && passwordHash) {
+    throw new UserStoreError(
+      'invalid_bootstrap_credential',
+      'Bootstrap admin credential cannot include both a password and a password hash.',
+      400,
+    )
+  }
+
+  if (passwordHash) {
+    if (!isSupportedPasswordHash(passwordHash)) {
+      throw new UserStoreError('invalid_password_hash', 'Unsupported password hash format.', 400)
+    }
+    return { passwordHash }
+  }
+
+  assertNonEmptyPassword(password)
+  return { password }
 }
 
 function findUserByUsername(state: UserStoreState, username: string): StoredUser | null {
@@ -399,18 +460,24 @@ export async function createUser(input: {
   })
 }
 
-export async function upsertBootstrapAdmin(username: string, password: string): Promise<UserProfile> {
+export async function upsertBootstrapAdmin(
+  username: string,
+  credential: string | BootstrapAdminCredential,
+): Promise<UserProfile> {
   const normalizedUsername = normalizeUsername(username)
+  const normalizedCredential = normalizeBootstrapAdminCredential(credential)
   assertValidUsername(normalizedUsername)
-  assertNonEmptyPassword(password)
 
   return enqueueMutation(async () => {
     const state = await loadState()
     const nowIso = new Date().toISOString()
     const existing = findUserByUsername(state, normalizedUsername)
+    const passwordHash = 'passwordHash' in normalizedCredential
+      ? normalizedCredential.passwordHash
+      : await hashPassword(normalizedCredential.password)
 
     if (existing) {
-      existing.passwordHash = await hashPassword(password)
+      existing.passwordHash = passwordHash
       existing.role = 'admin'
       existing.updatedAtIso = nowIso
       await persistState(state)
@@ -422,7 +489,7 @@ export async function upsertBootstrapAdmin(username: string, password: string): 
       username: normalizedUsername,
       usernameLower: normalizedUsername.toLowerCase(),
       role: 'admin',
-      passwordHash: await hashPassword(password),
+      passwordHash,
       createdAtIso: nowIso,
       updatedAtIso: nowIso,
     }

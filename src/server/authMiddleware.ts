@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import type { RequestHandler, Request, Response, NextFunction } from 'express'
 import {
+  type BootstrapAdminCredential,
   UserStoreError,
   authenticateUser,
   countUsers,
@@ -27,7 +28,8 @@ const SIGNUP_RATE_LIMIT_BLOCK_MS = 15 * 60 * 1000
 const SIGNUP_RATE_LIMIT_MAX_PER_IP = 20
 
 type AuthMiddlewareOptions = {
-  bootstrapAdminPassword: string
+  bootstrapAdminPassword?: string
+  bootstrapAdminPasswordHash?: string
   bootstrapAdminUsername?: string
 }
 
@@ -333,6 +335,17 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
     ? { bootstrapAdminPassword: passwordOrOptions }
     : passwordOrOptions
 
+  const bootstrapAdminPassword = typeof options.bootstrapAdminPassword === 'string'
+    ? options.bootstrapAdminPassword
+    : ''
+  const bootstrapAdminPasswordHash = typeof options.bootstrapAdminPasswordHash === 'string'
+    ? options.bootstrapAdminPasswordHash.trim()
+    : ''
+
+  if ((bootstrapAdminPassword ? 1 : 0) + (bootstrapAdminPasswordHash ? 1 : 0) !== 1) {
+    throw new Error('createAuthMiddleware requires exactly one bootstrap admin credential source.')
+  }
+
   const bootstrapAdminUsername =
     (options.bootstrapAdminUsername && options.bootstrapAdminUsername.trim().length > 0
       ? options.bootstrapAdminUsername.trim()
@@ -342,7 +355,10 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
   const loginRateLimitByIp = new Map<string, RateLimitRecord>()
   const loginRateLimitByUsername = new Map<string, RateLimitRecord>()
   const signupRateLimitByIp = new Map<string, RateLimitRecord>()
-  const bootstrapPromise = upsertBootstrapAdmin(bootstrapAdminUsername, options.bootstrapAdminPassword)
+  const bootstrapCredential: BootstrapAdminCredential = bootstrapAdminPasswordHash
+    ? { passwordHash: bootstrapAdminPasswordHash }
+    : { password: bootstrapAdminPassword }
+  const bootstrapPromise = upsertBootstrapAdmin(bootstrapAdminUsername, bootstrapCredential)
 
   async function resolveSessionUser(req: Request): Promise<UserProfile | null> {
     const cookies = parseCookies(req.headers.cookie)

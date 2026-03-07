@@ -47,6 +47,7 @@
     "docker:hub:logs": "bash scripts/docker/hub-logs.sh",
     "docker:hub:smoke": "bash scripts/docker/hub-smoke.sh",
     "docker:hub:register-local": "bash scripts/docker/hub-register-local-server.sh",
+    "admin:hash-password": "bash scripts/security/generate-admin-password-hash.sh",
     "docker:multi-server:prepare-auth": "bash scripts/docker/prepare-codex-auth.sh",
     "docker:multi-server:up": "bash scripts/docker/multi-server-up.sh",
     "docker:multi-server:smoke": "bash scripts/docker/multi-server-smoke.sh",

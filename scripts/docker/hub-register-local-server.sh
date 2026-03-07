@@ -38,22 +38,29 @@ fi
 
 SERVER_ID="${POSITIONAL[0]}"
 SERVER_NAME="${POSITIONAL[1]:-$SERVER_ID}"
+ADMIN_LOGIN_PASSWORD="${CODEXUI_ADMIN_LOGIN_PASSWORD:-${CODEXUI_ADMIN_PASSWORD:-}}"
+
+if [[ -z "$ADMIN_LOGIN_PASSWORD" ]]; then
+  echo "Set CODEXUI_ADMIN_LOGIN_PASSWORD (or CODEXUI_ADMIN_PASSWORD) before registering a Hub-local server." >&2
+  exit 1
+fi
 
 docker compose --project-directory "$ROOT_DIR" -f "$COMPOSE_FILE" exec -T \
   -e REGISTER_SERVER_ID="$SERVER_ID" \
   -e REGISTER_SERVER_NAME="$SERVER_NAME" \
   -e REGISTER_MAKE_DEFAULT="$MAKE_DEFAULT" \
+  -e ADMIN_LOGIN_PASSWORD="$ADMIN_LOGIN_PASSWORD" \
   "$SERVICE_NAME" \
   node --input-type=module <<'NODE'
 const baseUrl = `http://127.0.0.1:${process.env.CODEXUI_PORT || '4300'}`
 const username = process.env.CODEXUI_ADMIN_USERNAME || 'admin'
-const password = process.env.CODEXUI_ADMIN_PASSWORD || ''
+const password = process.env.ADMIN_LOGIN_PASSWORD || ''
 const serverId = process.env.REGISTER_SERVER_ID || ''
 const serverName = process.env.REGISTER_SERVER_NAME || serverId
 const makeDefault = process.env.REGISTER_MAKE_DEFAULT === '1'
 
 if (!password) {
-  console.error('CODEXUI_ADMIN_PASSWORD is not configured inside the hub container.')
+  console.error('A bootstrap admin login password was not provided to the helper.')
   process.exit(1)
 }
 
