@@ -1,10 +1,13 @@
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
+import {
+  getHubDatabase,
+  getLegacyUserStorePath,
+  readLegacyJsonFile,
+} from './sqliteStore.js'
 
-const USER_STORE_VERSION = 1
-const USER_STORE_RELATIVE_PATH = join('codexui', 'users.json')
+const USER_STORE_VERSION = 2
+const LEGACY_USER_STORE_RELATIVE_PATH = join('codexui', 'users.json')
 const USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$/u
 const MIN_PASSWORD_LENGTH = 8
 const HASH_ALGORITHM = 'scrypt'
@@ -34,16 +37,20 @@ function scrypt(password: string, salt: Buffer, keyLength: number, options: {
 }
 
 export type UserRole = 'admin' | 'user'
+export type UserApprovalStatus = 'pending' | 'approved'
 
 type StoredUser = {
   id: string
   username: string
   usernameLower: string
   role: UserRole
+  approvalStatus: UserApprovalStatus
   passwordHash: string
   createdAtIso: string
   updatedAtIso: string
   lastLoginAtIso?: string
+  approvedAtIso?: string
+  approvedByUserId?: string
 }
 
 type UserStoreState = {
@@ -55,14 +62,22 @@ export type UserProfile = {
   id: string
   username: string
   role: UserRole
+  approvalStatus: UserApprovalStatus
   createdAtIso: string
   updatedAtIso: string
   lastLoginAtIso?: string
+  approvedAtIso?: string
+  approvedByUserId?: string
 }
 
 export type BootstrapAdminCredential =
   | { password: string; passwordHash?: never }
   | { password?: never; passwordHash: string }
+
+export type AuthenticationResult =
+  | { status: 'authenticated'; user: UserProfile }
+  | { status: 'invalid' }
+  | { status: 'pending'; user: UserProfile }
 
 export class UserStoreError extends Error {
   readonly code: string
@@ -75,33 +90,13 @@ export class UserStoreError extends Error {
   }
 }
 
-let cachedState: UserStoreState | null = null
+let hasImportedLegacyUsers = false
 let mutationQueue: Promise<unknown> = Promise.resolve()
-
-function getCodexHomeDir(): string {
-  const codexHome = process.env.CODEX_HOME?.trim()
-  return codexHome && codexHome.length > 0 ? codexHome : join(homedir(), '.codex')
-}
-
-function getUserStorePath(): string {
-  return join(getCodexHomeDir(), USER_STORE_RELATIVE_PATH)
-}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null
-}
-
-function cloneUser(user: StoredUser): StoredUser {
-  return { ...user }
-}
-
-function cloneState(state: UserStoreState): UserStoreState {
-  return {
-    version: state.version,
-    users: state.users.map(cloneUser),
-  }
 }
 
 function normalizeUsername(value: string): string {
@@ -110,6 +105,10 @@ function normalizeUsername(value: string): string {
 
 function normalizeRole(value: unknown): UserRole {
   return value === 'admin' ? 'admin' : 'user'
+}
+
+function normalizeApprovalStatus(value: unknown): UserApprovalStatus {
+  return value === 'pending' ? 'pending' : 'approved'
 }
 
 function parseDate(value: unknown, fallbackIso: string): string {
@@ -140,16 +139,28 @@ function normalizeStoredUser(value: unknown, nowIso: string): StoredUser | null 
   const lastLoginAtIso = typeof record.lastLoginAtIso === 'string' && record.lastLoginAtIso.trim().length > 0
     ? parseDate(record.lastLoginAtIso, updatedAtIso)
     : undefined
+  const approvalStatus = normalizeApprovalStatus(record.approvalStatus)
+  const approvedAtIso = typeof record.approvedAtIso === 'string' && record.approvedAtIso.trim().length > 0
+    ? parseDate(record.approvedAtIso, updatedAtIso)
+    : approvalStatus === 'approved'
+      ? updatedAtIso
+      : undefined
+  const approvedByUserId = typeof record.approvedByUserId === 'string' && record.approvedByUserId.trim().length > 0
+    ? record.approvedByUserId.trim()
+    : undefined
 
   return {
     id,
     username,
     usernameLower,
     role: normalizeRole(record.role),
+    approvalStatus,
     passwordHash,
     createdAtIso,
     updatedAtIso,
     ...(lastLoginAtIso ? { lastLoginAtIso } : {}),
+    ...(approvedAtIso ? { approvedAtIso } : {}),
+    ...(approvedByUserId ? { approvedByUserId } : {}),
   }
 }
 
@@ -179,56 +190,17 @@ function normalizeState(value: unknown, nowIso = new Date().toISOString()): User
   }
 }
 
-async function readStateFromDisk(): Promise<UserStoreState> {
-  const storePath = getUserStorePath()
-  try {
-    const raw = await readFile(storePath, 'utf8')
-    return normalizeState(JSON.parse(raw) as unknown)
-  } catch {
-    return normalizeState(null)
-  }
-}
-
-async function writeStateToDisk(nextState: UserStoreState): Promise<void> {
-  const storePath = getUserStorePath()
-  await mkdir(dirname(storePath), { recursive: true })
-  const payload = JSON.stringify(nextState, null, 2)
-  const tempPath = `${storePath}.${process.pid}.${Date.now()}.tmp`
-  await writeFile(tempPath, payload, { encoding: 'utf8', mode: 0o600 })
-  await rename(tempPath, storePath)
-}
-
-async function loadState(): Promise<UserStoreState> {
-  if (cachedState) return cloneState(cachedState)
-  const state = await readStateFromDisk()
-  cachedState = cloneState(state)
-  return cloneState(state)
-}
-
-async function persistState(nextState: UserStoreState): Promise<void> {
-  const normalized = normalizeState(nextState)
-  await writeStateToDisk(normalized)
-  cachedState = cloneState(normalized)
-}
-
-function waitForMutations(): Promise<void> {
-  return mutationQueue.then(() => undefined, () => undefined)
-}
-
-function enqueueMutation<T>(run: () => Promise<T>): Promise<T> {
-  const pending = mutationQueue.then(run, run)
-  mutationQueue = pending.then(() => undefined, () => undefined)
-  return pending
-}
-
 function toUserProfile(user: StoredUser): UserProfile {
   return {
     id: user.id,
     username: user.username,
     role: user.role,
+    approvalStatus: user.approvalStatus,
     createdAtIso: user.createdAtIso,
     updatedAtIso: user.updatedAtIso,
     ...(user.lastLoginAtIso ? { lastLoginAtIso: user.lastLoginAtIso } : {}),
+    ...(user.approvedAtIso ? { approvedAtIso: user.approvedAtIso } : {}),
+    ...(user.approvedByUserId ? { approvedByUserId: user.approvedByUserId } : {}),
   }
 }
 
@@ -313,12 +285,11 @@ async function verifyPassword(password: string, encodedHash: string): Promise<bo
     ...parsed.params,
     maxmem: DEFAULT_SCRYPT_PARAMS.maxmem,
   })
-  const actual = derived
 
-  if (actual.length !== parsed.expected.length) {
+  if (derived.length !== parsed.expected.length) {
     return false
   }
-  return timingSafeEqual(actual, parsed.expected)
+  return timingSafeEqual(derived, parsed.expected)
 }
 
 function assertValidUsername(username: string): void {
@@ -373,23 +344,104 @@ function normalizeBootstrapAdminCredential(
   return { password }
 }
 
-function findUserByUsername(state: UserStoreState, username: string): StoredUser | null {
-  const normalized = username.toLowerCase()
-  return state.users.find((candidate) => candidate.usernameLower === normalized) ?? null
+function rowToStoredUser(row: Record<string, unknown>): StoredUser {
+  return {
+    id: String(row.id),
+    username: String(row.username),
+    usernameLower: String(row.username_lower),
+    role: normalizeRole(row.role),
+    approvalStatus: normalizeApprovalStatus(row.approval_status),
+    passwordHash: String(row.password_hash),
+    createdAtIso: String(row.created_at_iso),
+    updatedAtIso: String(row.updated_at_iso),
+    ...(typeof row.last_login_at_iso === 'string' ? { lastLoginAtIso: row.last_login_at_iso } : {}),
+    ...(typeof row.approved_at_iso === 'string' ? { approvedAtIso: row.approved_at_iso } : {}),
+    ...(typeof row.approved_by_user_id === 'string' ? { approvedByUserId: row.approved_by_user_id } : {}),
+  }
+}
+
+function importLegacyUsersIfNeeded(): void {
+  if (hasImportedLegacyUsers) {
+    return
+  }
+
+  const database = getHubDatabase()
+  const countRow = database.prepare('SELECT COUNT(*) AS total FROM users').get() as { total: number }
+  if (countRow.total > 0) {
+    hasImportedLegacyUsers = true
+    return
+  }
+
+  const legacyState = normalizeState(readLegacyJsonFile(getLegacyUserStorePath()))
+  if (legacyState.users.length === 0) {
+    hasImportedLegacyUsers = true
+    return
+  }
+
+  const insert = database.prepare(`
+    INSERT INTO users (
+      id,
+      username,
+      username_lower,
+      role,
+      approval_status,
+      password_hash,
+      created_at_iso,
+      updated_at_iso,
+      last_login_at_iso,
+      approved_at_iso,
+      approved_by_user_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  const insertMany = database.transaction((users: StoredUser[]) => {
+    for (const user of users) {
+      insert.run(
+        user.id,
+        user.username,
+        user.usernameLower,
+        user.role,
+        user.approvalStatus,
+        user.passwordHash,
+        user.createdAtIso,
+        user.updatedAtIso,
+        user.lastLoginAtIso ?? null,
+        user.approvedAtIso ?? user.updatedAtIso,
+        user.approvedByUserId ?? null,
+      )
+    }
+  })
+
+  insertMany(legacyState.users)
+  hasImportedLegacyUsers = true
+}
+
+function waitForMutations(): Promise<void> {
+  return mutationQueue.then(() => undefined, () => undefined)
+}
+
+function enqueueMutation<T>(run: () => Promise<T>): Promise<T> {
+  const pending = mutationQueue.then(run, run)
+  mutationQueue = pending.then(() => undefined, () => undefined)
+  return pending
+}
+
+function findUserByUsernameRow(username: string): Record<string, unknown> | undefined {
+  importLegacyUsersIfNeeded()
+  return getHubDatabase().prepare('SELECT * FROM users WHERE username_lower = ?').get(username.toLowerCase()) as Record<string, unknown> | undefined
 }
 
 export async function countUsers(): Promise<number> {
   await waitForMutations()
-  const state = await loadState()
-  return state.users.length
+  importLegacyUsersIfNeeded()
+  const row = getHubDatabase().prepare('SELECT COUNT(*) AS total FROM users').get() as { total: number }
+  return row.total
 }
 
 export async function listUsers(): Promise<UserProfile[]> {
   await waitForMutations()
-  const state = await loadState()
-  return state.users
-    .map(toUserProfile)
-    .sort((a, b) => a.username.localeCompare(b.username))
+  importLegacyUsersIfNeeded()
+  const rows = getHubDatabase().prepare('SELECT * FROM users ORDER BY username_lower ASC').all() as Record<string, unknown>[]
+  return rows.map((row) => toUserProfile(rowToStoredUser(row)))
 }
 
 export async function findUserById(userId: string): Promise<UserProfile | null> {
@@ -397,38 +449,61 @@ export async function findUserById(userId: string): Promise<UserProfile | null> 
   if (!normalized) return null
 
   await waitForMutations()
-  const state = await loadState()
-  const user = state.users.find((candidate) => candidate.id === normalized)
-  return user ? toUserProfile(user) : null
+  importLegacyUsersIfNeeded()
+  const row = getHubDatabase().prepare('SELECT * FROM users WHERE id = ?').get(normalized) as Record<string, unknown> | undefined
+  return row ? toUserProfile(rowToStoredUser(row)) : null
 }
 
-export async function authenticateUser(username: string, password: string): Promise<UserProfile | null> {
+export async function attemptAuthenticateUser(username: string, password: string): Promise<AuthenticationResult> {
   const normalizedUsername = normalizeUsername(username)
   if (!normalizedUsername || !password) {
-    return null
+    return { status: 'invalid' }
   }
 
   return enqueueMutation(async () => {
-    const state = await loadState()
-    const user = findUserByUsername(state, normalizedUsername)
-    if (!user) return null
+    const row = findUserByUsernameRow(normalizedUsername)
+    if (!row) return { status: 'invalid' }
 
+    const user = rowToStoredUser(row)
     const valid = await verifyPassword(password, user.passwordHash)
-    if (!valid) return null
+    if (!valid) return { status: 'invalid' }
+
+    if (user.approvalStatus !== 'approved') {
+      return {
+        status: 'pending',
+        user: toUserProfile(user),
+      }
+    }
 
     const nowIso = new Date().toISOString()
-    user.lastLoginAtIso = nowIso
-    user.updatedAtIso = nowIso
+    getHubDatabase().prepare(`
+      UPDATE users
+      SET last_login_at_iso = ?, updated_at_iso = ?
+      WHERE id = ?
+    `).run(nowIso, nowIso, user.id)
 
-    await persistState(state)
-    return toUserProfile(user)
+    return {
+      status: 'authenticated',
+      user: {
+        ...toUserProfile(user),
+        lastLoginAtIso: nowIso,
+        updatedAtIso: nowIso,
+      },
+    }
   })
+}
+
+export async function authenticateUser(username: string, password: string): Promise<UserProfile | null> {
+  const result = await attemptAuthenticateUser(username, password)
+  return result.status === 'authenticated' ? result.user : null
 }
 
 export async function createUser(input: {
   username: string
   password: string
   role?: UserRole
+  approvalStatus?: UserApprovalStatus
+  approvedByUserId?: string
 }): Promise<UserProfile> {
   const username = normalizeUsername(input.username)
   const password = input.password
@@ -436,27 +511,91 @@ export async function createUser(input: {
   assertValidPassword(password)
 
   const role = normalizeRole(input.role)
+  const approvalStatus = normalizeApprovalStatus(input.approvalStatus)
 
   return enqueueMutation(async () => {
-    const state = await loadState()
-    if (findUserByUsername(state, username)) {
+    importLegacyUsersIfNeeded()
+    if (findUserByUsernameRow(username)) {
       throw new UserStoreError('user_exists', `User "${username}" already exists.`, 409)
     }
 
     const nowIso = new Date().toISOString()
-    const user: StoredUser = {
-      id: randomBytes(16).toString('hex'),
+    const passwordHash = await hashPassword(password)
+    const approvedAtIso = approvalStatus === 'approved' ? nowIso : undefined
+    const approvedByUserId = approvalStatus === 'approved'
+      ? (input.approvedByUserId?.trim() || undefined)
+      : undefined
+
+    getHubDatabase().prepare(`
+      INSERT INTO users (
+        id,
+        username,
+        username_lower,
+        role,
+        approval_status,
+        password_hash,
+        created_at_iso,
+        updated_at_iso,
+        last_login_at_iso,
+        approved_at_iso,
+        approved_by_user_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      randomBytes(16).toString('hex'),
       username,
-      usernameLower: username.toLowerCase(),
+      username.toLowerCase(),
       role,
-      passwordHash: await hashPassword(password),
-      createdAtIso: nowIso,
-      updatedAtIso: nowIso,
+      approvalStatus,
+      passwordHash,
+      nowIso,
+      nowIso,
+      null,
+      approvedAtIso ?? null,
+      approvedByUserId ?? null,
+    )
+
+    const createdRow = findUserByUsernameRow(username)
+    if (!createdRow) {
+      throw new UserStoreError('user_create_failed', `Failed to create user "${username}".`, 500)
+    }
+    return toUserProfile(rowToStoredUser(createdRow))
+  })
+}
+
+export async function approveUser(userId: string, approvedByUserId: string): Promise<UserProfile> {
+  const normalizedUserId = userId.trim()
+  const normalizedApprovedByUserId = approvedByUserId.trim()
+  if (!normalizedUserId) {
+    throw new UserStoreError('invalid_user_id', 'User id is required.', 400)
+  }
+  if (!normalizedApprovedByUserId) {
+    throw new UserStoreError('invalid_approver', 'Approver user id is required.', 400)
+  }
+
+  return enqueueMutation(async () => {
+    importLegacyUsersIfNeeded()
+    const currentRow = getHubDatabase().prepare('SELECT * FROM users WHERE id = ?').get(normalizedUserId) as Record<string, unknown> | undefined
+    if (!currentRow) {
+      throw new UserStoreError('user_not_found', `User "${normalizedUserId}" was not found.`, 404)
     }
 
-    state.users.push(user)
-    await persistState(state)
-    return toUserProfile(user)
+    const user = rowToStoredUser(currentRow)
+    const nowIso = new Date().toISOString()
+    const approvedAtIso = user.approvalStatus === 'approved' && user.approvedAtIso
+      ? user.approvedAtIso
+      : nowIso
+
+    getHubDatabase().prepare(`
+      UPDATE users
+      SET approval_status = 'approved',
+          approved_at_iso = ?,
+          approved_by_user_id = ?,
+          updated_at_iso = ?
+      WHERE id = ?
+    `).run(approvedAtIso, normalizedApprovedByUserId, nowIso, normalizedUserId)
+
+    const updatedRow = getHubDatabase().prepare('SELECT * FROM users WHERE id = ?').get(normalizedUserId) as Record<string, unknown>
+    return toUserProfile(rowToStoredUser(updatedRow))
   })
 }
 
@@ -469,19 +608,25 @@ export async function upsertBootstrapAdmin(
   assertValidUsername(normalizedUsername)
 
   return enqueueMutation(async () => {
-    const state = await loadState()
+    importLegacyUsersIfNeeded()
     const nowIso = new Date().toISOString()
-    const existing = findUserByUsername(state, normalizedUsername)
+    const existingRow = findUserByUsernameRow(normalizedUsername)
     const passwordHash = ('passwordHash' in normalizedCredential && typeof normalizedCredential.passwordHash === 'string')
       ? normalizedCredential.passwordHash
       : await hashPassword(normalizedCredential.password)
 
-    if (existing) {
-      existing.passwordHash = passwordHash
-      existing.role = 'admin'
-      existing.updatedAtIso = nowIso
-      await persistState(state)
-      return toUserProfile(existing)
+    if (existingRow) {
+      getHubDatabase().prepare(`
+        UPDATE users
+        SET password_hash = ?,
+            role = 'admin',
+            approval_status = 'approved',
+            approved_at_iso = COALESCE(approved_at_iso, ?),
+            updated_at_iso = ?
+        WHERE id = ?
+      `).run(passwordHash, nowIso, nowIso, existingRow.id)
+      const updatedRow = getHubDatabase().prepare('SELECT * FROM users WHERE id = ?').get(existingRow.id) as Record<string, unknown>
+      return toUserProfile(rowToStoredUser(updatedRow))
     }
 
     const created: StoredUser = {
@@ -489,13 +634,41 @@ export async function upsertBootstrapAdmin(
       username: normalizedUsername,
       usernameLower: normalizedUsername.toLowerCase(),
       role: 'admin',
+      approvalStatus: 'approved',
       passwordHash,
       createdAtIso: nowIso,
       updatedAtIso: nowIso,
+      approvedAtIso: nowIso,
     }
 
-    state.users.push(created)
-    await persistState(state)
+    getHubDatabase().prepare(`
+      INSERT INTO users (
+        id,
+        username,
+        username_lower,
+        role,
+        approval_status,
+        password_hash,
+        created_at_iso,
+        updated_at_iso,
+        last_login_at_iso,
+        approved_at_iso,
+        approved_by_user_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      created.id,
+      created.username,
+      created.usernameLower,
+      created.role,
+      created.approvalStatus,
+      created.passwordHash,
+      created.createdAtIso,
+      created.updatedAtIso,
+      null,
+      created.approvedAtIso,
+      null,
+    )
+
     return toUserProfile(created)
   })
 }

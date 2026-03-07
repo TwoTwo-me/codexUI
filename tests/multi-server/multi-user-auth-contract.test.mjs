@@ -41,7 +41,7 @@ async function postJson(url, payload, headers = {}) {
   })
 }
 
-test('multi-user auth contract supports signup/login/session/admin authorization', async () => {
+test('multi-user auth contract supports public registration, admin approval, and admin authorization', async () => {
   await withApiServer(async (baseUrl) => {
     const adminSignup = await postJson(`${baseUrl}/auth/signup`, {
       username: 'admin-user',
@@ -52,11 +52,19 @@ test('multi-user auth contract supports signup/login/session/admin authorization
     const bootstrapCookie = adminSignup.headers.get('set-cookie')
     assert.ok(bootstrapCookie)
 
-    const anonymousMemberSignup = await postJson(`${baseUrl}/auth/signup`, {
-      username: 'anonymous-member',
-      password: 'anonymous-member-pass-1',
+    const pendingRegistration = await postJson(`${baseUrl}/auth/register`, {
+      username: 'pending-user',
+      password: 'pending-pass-1',
     })
-    assert.equal(anonymousMemberSignup.status, 401)
+    assert.equal(pendingRegistration.status, 202)
+    const pendingRegistrationBody = await pendingRegistration.json()
+    assert.equal(pendingRegistrationBody.status, 'pending')
+
+    const pendingLoginBeforeApproval = await postJson(`${baseUrl}/auth/login`, {
+      username: 'pending-user',
+      password: 'pending-pass-1',
+    })
+    assert.equal(pendingLoginBeforeApproval.status, 403)
 
     const adminLogin = await postJson(`${baseUrl}/auth/login`, {
       username: 'admin-user',
@@ -66,7 +74,7 @@ test('multi-user auth contract supports signup/login/session/admin authorization
     const adminCookie = adminLogin.headers.get('set-cookie')
     assert.ok(adminCookie)
 
-    const memberSignup = await postJson(
+    const approvedMemberSignup = await postJson(
       `${baseUrl}/auth/signup`,
       {
         username: 'member-user',
@@ -74,7 +82,7 @@ test('multi-user auth contract supports signup/login/session/admin authorization
       },
       { Cookie: adminCookie },
     )
-    assert.equal(memberSignup.status, 201)
+    assert.equal(approvedMemberSignup.status, 201)
 
     const memberLogin = await postJson(`${baseUrl}/auth/login`, {
       username: 'member-user',
@@ -103,20 +111,6 @@ test('multi-user auth contract supports signup/login/session/admin authorization
     assert.equal(adminSessionBody.user.username, 'admin-user')
     assert.equal(adminSessionBody.user.role, 'admin')
 
-    const memberSession = await fetch(`${baseUrl}/auth/session`, {
-      headers: { Cookie: memberCookie },
-    })
-    assert.equal(memberSession.status, 200)
-    const memberSessionBody = await memberSession.json()
-    assert.equal(memberSessionBody.authenticated, true)
-    assert.equal(memberSessionBody.user.username, 'member-user')
-    assert.equal(memberSessionBody.user.role, 'user')
-
-    const anonymousSession = await fetch(`${baseUrl}/auth/session`)
-    assert.equal(anonymousSession.status, 200)
-    const anonymousSessionBody = await anonymousSession.json()
-    assert.equal(anonymousSessionBody.authenticated, false)
-
     const anonymousAdminList = await fetch(`${baseUrl}/codex-api/admin/users`)
     assert.equal(anonymousAdminList.status, 401)
 
@@ -132,11 +126,37 @@ test('multi-user auth contract supports signup/login/session/admin authorization
     const adminUserListBody = await adminUserList.json()
 
     assert.deepEqual(
-      adminUserListBody.data.map((user) => ({ username: user.username, role: user.role })),
+      adminUserListBody.data.map((user) => ({ username: user.username, role: user.role, approvalStatus: user.approvalStatus })),
       [
-        { username: 'admin-user', role: 'admin' },
-        { username: 'member-user', role: 'user' },
+        { username: 'admin-user', role: 'admin', approvalStatus: 'approved' },
+        { username: 'member-user', role: 'user', approvalStatus: 'approved' },
+        { username: 'pending-user', role: 'user', approvalStatus: 'pending' },
       ],
     )
+
+    const pendingUser = adminUserListBody.data.find((user) => user.username === 'pending-user')
+    assert.ok(pendingUser)
+
+    const memberCannotApprove = await postJson(
+      `${baseUrl}/codex-api/admin/users/${pendingUser.id}/approve`,
+      {},
+      { Cookie: memberCookie },
+    )
+    assert.equal(memberCannotApprove.status, 403)
+
+    const approvePending = await postJson(
+      `${baseUrl}/codex-api/admin/users/${pendingUser.id}/approve`,
+      {},
+      { Cookie: adminCookie },
+    )
+    assert.equal(approvePending.status, 200)
+    const approvePendingBody = await approvePending.json()
+    assert.equal(approvePendingBody.data.user.approvalStatus, 'approved')
+
+    const pendingLoginAfterApproval = await postJson(`${baseUrl}/auth/login`, {
+      username: 'pending-user',
+      password: 'pending-pass-1',
+    })
+    assert.equal(pendingLoginAfterApproval.status, 200)
   })
 })

@@ -284,6 +284,7 @@ function publicUserRecord(user) {
     id: user.id,
     username: user.username,
     role: user.role,
+    approvalStatus: user.approvalStatus === 'pending' ? 'pending' : 'approved',
     createdAtIso: user.createdAtIso,
     updatedAtIso: user.updatedAtIso,
     ...(user.lastLoginAtIso ? { lastLoginAtIso: user.lastLoginAtIso } : {}),
@@ -523,6 +524,7 @@ export function createMultiUserContractApi() {
           id: `user-${String(nextUserNumber)}`,
           username,
           role,
+          approvalStatus: 'approved',
           passwordHash: hashSecret(password),
           createdAtIso: nowIso,
           updatedAtIso: nowIso,
@@ -545,6 +547,43 @@ export function createMultiUserContractApi() {
         return jsonResponse(201, { ok: true, user: publicUserRecord(user) }, responseHeaders)
       }
 
+      if (method === 'POST' && url.pathname === '/auth/register') {
+        const payload = parseJsonBody(request?.body)
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return jsonResponse(400, { error: 'Invalid body: expected object' })
+        }
+
+        const username = typeof payload.username === 'string' ? payload.username.trim() : ''
+        const password = typeof payload.password === 'string' ? payload.password : ''
+        if (!username || !password) {
+          return jsonResponse(400, { error: 'Missing username or password' })
+        }
+        if (usersByUsername.size === 0) {
+          return jsonResponse(409, { error: 'Create the bootstrap admin with /auth/signup first.' })
+        }
+        if (usersByUsername.has(username)) {
+          return jsonResponse(409, { error: `User "${username}" already exists` })
+        }
+
+        const nowIso = new Date().toISOString()
+        const user = {
+          id: `user-${String(nextUserNumber)}`,
+          username,
+          role: 'user',
+          approvalStatus: 'pending',
+          passwordHash: hashSecret(password),
+          createdAtIso: nowIso,
+          updatedAtIso: nowIso,
+        }
+        nextUserNumber += 1
+        usersByUsername.set(username, user)
+        return jsonResponse(202, {
+          ok: true,
+          status: 'pending',
+          user: publicUserRecord(user),
+        })
+      }
+
       if (method === 'POST' && url.pathname === '/auth/login') {
         const payload = parseJsonBody(request?.body)
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -558,6 +597,9 @@ export function createMultiUserContractApi() {
         const validPassword = user ? constantTimeCompare(hashSecret(password), user.passwordHash) : false
         if (!user || !validPassword) {
           return jsonResponse(401, { error: 'Invalid credentials' })
+        }
+        if (user.approvalStatus === 'pending') {
+          return jsonResponse(403, { error: 'Your account is waiting for admin approval.' })
         }
 
         const token = `session-${String(nextSessionNumber)}-${randomBytes(8).toString('hex')}`
@@ -594,8 +636,29 @@ export function createMultiUserContractApi() {
           return jsonResponse(403, { error: 'Admin role required' })
         }
 
-        const users = Array.from(usersByUsername.values()).map(publicUserRecord)
+        const users = Array.from(usersByUsername.values())
+          .sort((left, right) => left.username.localeCompare(right.username))
+          .map(publicUserRecord)
         return jsonResponse(200, { data: users })
+      }
+
+      const adminApproveMatch = /^\/codex-api\/admin\/users\/([^/]+)\/approve$/u.exec(url.pathname)
+      if (method === 'POST' && adminApproveMatch) {
+        const user = resolveSessionUser(request?.headers)
+        if (!user) {
+          return jsonResponse(401, { error: 'Authentication required' })
+        }
+        if (user.role !== 'admin') {
+          return jsonResponse(403, { error: 'Admin role required' })
+        }
+        const targetUserId = decodeURIComponent(adminApproveMatch[1] ?? '').trim()
+        const targetUser = Array.from(usersByUsername.values()).find((candidate) => candidate.id === targetUserId)
+        if (!targetUser) {
+          return jsonResponse(404, { error: 'User not found' })
+        }
+        targetUser.approvalStatus = 'approved'
+        targetUser.updatedAtIso = new Date().toISOString()
+        return jsonResponse(200, { data: { user: publicUserRecord(targetUser) } })
       }
 
       if (url.pathname === '/codex-api/admin/users') {

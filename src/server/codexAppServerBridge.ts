@@ -8,8 +8,9 @@ import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { writeFile } from 'node:fs/promises'
 import { getRequestAuthScopeKey, getRequestAuthenticatedUser } from './requestAuthContext.js'
+import { readHubStatePayload, writeHubStatePayload } from './sqliteStore.js'
 import { OutboundRelayHub, RelayHubError } from './relay/relayHub.js'
-import { listUsers } from './userStore.js'
+import { approveUser, listUsers } from './userStore.js'
 import {
   RELAY_CHANNEL_ID_HEADER,
   RELAY_HUB_CHANNEL,
@@ -507,10 +508,6 @@ async function readCodexAuth(): Promise<{ accessToken: string; accountId?: strin
   }
 }
 
-function getCodexGlobalStatePath(): string {
-  return join(getCodexHomeDir(), '.codex-global-state.json')
-}
-
 const SERVER_REGISTRY_STATE_KEY = 'codexui-server-registry'
 const SERVER_REGISTRY_STATE_BY_USER_KEY = 'codexui-server-registry-by-user'
 const CONNECTOR_REGISTRY_STATE_KEY = 'codexui-connector-registry'
@@ -842,18 +839,11 @@ function normalizeConnectorRegistryState(value: unknown, nowIso = new Date().toI
 }
 
 async function readCodexGlobalStatePayload(): Promise<Record<string, unknown>> {
-  const statePath = getCodexGlobalStatePath()
-  try {
-    const raw = await readFile(statePath, 'utf8')
-    return asRecord(JSON.parse(raw)) ?? {}
-  } catch {
-    return {}
-  }
+  return readHubStatePayload()
 }
 
 async function writeCodexGlobalStatePayload(payload: Record<string, unknown>): Promise<void> {
-  const statePath = getCodexGlobalStatePath()
-  await writeFile(statePath, JSON.stringify(payload), 'utf8')
+  writeHubStatePayload(payload)
 }
 
 function resolveServerRegistryScope(req: IncomingMessage): ServerRegistryScope {
@@ -1797,27 +1787,14 @@ function removeFromThreadTitleCache(cache: ThreadTitleCache, id: string): Thread
 }
 
 async function readThreadTitleCache(): Promise<ThreadTitleCache> {
-  const statePath = getCodexGlobalStatePath()
-  try {
-    const raw = await readFile(statePath, 'utf8')
-    const payload = asRecord(JSON.parse(raw)) ?? {}
-    return normalizeThreadTitleCache(payload['thread-titles'])
-  } catch {
-    return { titles: {}, order: [] }
-  }
+  const payload = await readCodexGlobalStatePayload()
+  return normalizeThreadTitleCache(payload['thread-titles'])
 }
 
 async function writeThreadTitleCache(cache: ThreadTitleCache): Promise<void> {
-  const statePath = getCodexGlobalStatePath()
-  let payload: Record<string, unknown> = {}
-  try {
-    const raw = await readFile(statePath, 'utf8')
-    payload = asRecord(JSON.parse(raw)) ?? {}
-  } catch {
-    payload = {}
-  }
+  const payload = await readCodexGlobalStatePayload()
   payload['thread-titles'] = cache
-  await writeFile(statePath, JSON.stringify(payload), 'utf8')
+  await writeCodexGlobalStatePayload(payload)
 }
 
 
@@ -2761,6 +2738,24 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
 
         const users = await listUsers()
         setJson(res, 200, { data: users })
+        return
+      }
+
+      const adminUserActionMatch = /^\/codex-api\/admin\/users\/([^/]+)\/approve$/u.exec(url.pathname)
+      if (req.method === 'POST' && adminUserActionMatch) {
+        const adminUser = requireAdminUser(req)
+        const approvedUserId = decodeURIComponent(adminUserActionMatch[1] ?? '').trim()
+        if (!approvedUserId) {
+          setJson(res, 400, { error: 'User id is required' })
+          return
+        }
+
+        const approvedUser = await approveUser(approvedUserId, adminUser.id)
+        setJson(res, 200, {
+          data: {
+            user: approvedUser,
+          },
+        })
         return
       }
 

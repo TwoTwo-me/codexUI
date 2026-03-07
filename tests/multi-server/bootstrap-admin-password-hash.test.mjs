@@ -7,11 +7,13 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import Database from 'better-sqlite3'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..', '..')
 const distCliPath = join(repoRoot, 'dist-cli', 'index.js')
 const entrypointPath = join(repoRoot, 'docker', 'hub', 'entrypoint.sh')
+const sqliteFilePath = (codeHome) => join(codeHome, 'codexui', 'hub.sqlite')
 
 accessSync(distCliPath, fsConstants.F_OK)
 
@@ -132,9 +134,9 @@ async function waitForServerReady(baseUrl, child, outputRef) {
   throw new Error(`Timed out waiting for ${baseUrl}\n${outputRef.stdout}\n${outputRef.stderr}`)
 }
 
-async function startServer({ args = [], env = {} } = {}) {
+async function startServer({ args = [], env = {}, codeHome: explicitCodeHome } = {}) {
   const port = await getAvailablePort()
-  const codeHome = await mkdtemp(join(tmpdir(), 'codexui-password-hash-'))
+  const codeHome = explicitCodeHome ?? await mkdtemp(join(tmpdir(), 'codexui-password-hash-'))
   const child = spawn('node', ['dist-cli/index.js', '--host', '127.0.0.1', '--port', String(port), '--username', 'hash-admin', ...args], {
     cwd: repoRoot,
     env: createBaseEnv({
@@ -184,6 +186,15 @@ async function postJson(url, payload) {
   })
 }
 
+function querySqliteRows(databasePath, sql, params = []) {
+  const database = new Database(databasePath, { readonly: true })
+  try {
+    return database.prepare(sql).all(...params)
+  } finally {
+    database.close()
+  }
+}
+
 test('hash-password CLI emits a bootstrap admin password hash and env assignment', async () => {
   const rawHash = await generatePasswordHash('cli-secret-pass-1')
   assert.match(rawHash, /^scrypt\$/u)
@@ -195,7 +206,7 @@ test('hash-password CLI emits a bootstrap admin password hash and env assignment
   assert.notEqual(envLine, `CODEXUI_ADMIN_PASSWORD_HASH=cli-secret-pass-1`)
 })
 
-test('server authenticates bootstrap admin login with --password-hash and stores the precomputed hash', async () => {
+test('server authenticates bootstrap admin login with --password-hash and stores the precomputed hash in sqlite', async () => {
   const plaintextPassword = 'hash-secret-pass-1'
   const passwordHash = await generatePasswordHash(plaintextPassword)
   const server = await startServer({
@@ -224,13 +235,93 @@ test('server authenticates bootstrap admin login with --password-hash and stores
     assert.match(server.outputRef.stdout, /configured via precomputed hash/i)
     assert.doesNotMatch(server.outputRef.stdout, new RegExp(plaintextPassword.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'))
 
-    const userStoreRaw = await readFile(join(server.codeHome, 'codexui', 'users.json'), 'utf8')
-    const userStore = JSON.parse(userStoreRaw)
-    assert.equal(userStore.users.length, 1)
-    assert.equal(userStore.users[0].username, 'hash-admin')
-    assert.equal(userStore.users[0].passwordHash, passwordHash)
+    const userRows = querySqliteRows(
+      sqliteFilePath(server.codeHome),
+      'select username, password_hash as passwordHash, approval_status as approvalStatus from users order by username',
+    )
+    assert.equal(userRows.length, 1)
+    assert.equal(userRows[0].username, 'hash-admin')
+    assert.equal(userRows[0].passwordHash, passwordHash)
+    assert.equal(userRows[0].approvalStatus, 'approved')
+    await assert.rejects(readFile(join(server.codeHome, 'codexui', 'users.json'), 'utf8'))
   } finally {
     await server.stop()
+  }
+})
+
+test('server persists registered servers across restart using sqlite-backed hub state', async () => {
+  const plaintextPassword = 'sqlite-state-pass-1'
+  const passwordHash = await generatePasswordHash(plaintextPassword)
+  const codeHome = await mkdtemp(join(tmpdir(), 'codexui-sqlite-state-'))
+
+  const firstServer = await startServer({
+    args: ['--password-hash', passwordHash],
+    codeHome,
+  })
+
+  try {
+    const loginResponse = await postJson(`${firstServer.baseUrl}/auth/login`, {
+      username: 'hash-admin',
+      password: plaintextPassword,
+    })
+    assert.equal(loginResponse.status, 200)
+    const adminCookie = loginResponse.headers.get('set-cookie')
+    assert.ok(adminCookie)
+
+    const registerServerResponse = await fetch(`${firstServer.baseUrl}/codex-api/servers`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Cookie: adminCookie,
+      },
+      body: JSON.stringify({
+        id: 'local-main',
+        name: 'Local Main',
+        isDefault: true,
+      }),
+    })
+    assert.equal(registerServerResponse.status, 201)
+  } finally {
+    await firstServer.stop()
+  }
+
+  const stateRows = querySqliteRows(
+    sqliteFilePath(codeHome),
+    'select scope, entry_key as entryKey from state_entries order by scope, entry_key',
+  )
+  assert.ok(stateRows.some((row) => row.scope === 'hub' && row.entryKey === 'codex-global-state'))
+  await assert.rejects(readFile(join(codeHome, '.codex-global-state.json'), 'utf8'))
+
+  const secondServer = await startServer({
+    args: ['--password-hash', passwordHash],
+    codeHome,
+  })
+
+  try {
+    const loginResponse = await postJson(`${secondServer.baseUrl}/auth/login`, {
+      username: 'hash-admin',
+      password: plaintextPassword,
+    })
+    assert.equal(loginResponse.status, 200)
+    const adminCookie = loginResponse.headers.get('set-cookie')
+    assert.ok(adminCookie)
+
+    const registryResponse = await fetch(`${secondServer.baseUrl}/codex-api/servers`, {
+      headers: {
+        Accept: 'application/json',
+        Cookie: adminCookie,
+      },
+    })
+    assert.equal(registryResponse.status, 200)
+    const registryBody = await registryResponse.json()
+    assert.equal(registryBody.data.defaultServerId, 'local-main')
+    assert.deepEqual(
+      registryBody.data.servers.map((server) => ({ id: server.id, name: server.name, transport: server.transport })),
+      [{ id: 'local-main', name: 'Local Main', transport: 'local' }],
+    )
+  } finally {
+    await secondServer.stop()
   }
 })
 

@@ -3,14 +3,14 @@ import type { RequestHandler, Request, Response, NextFunction } from 'express'
 import {
   type BootstrapAdminCredential,
   UserStoreError,
-  authenticateUser,
+  attemptAuthenticateUser,
   countUsers,
   createUser,
   findUserById,
   listUsers,
-  upsertBootstrapAdmin,
-  type UserRole,
   type UserProfile,
+  type UserRole,
+  upsertBootstrapAdmin,
 } from './userStore.js'
 import { setRequestAuthenticatedUser } from './requestAuthContext.js'
 
@@ -46,10 +46,7 @@ type RateLimitRecord = {
 
 function isLocalhostRequest(req: Request): boolean {
   const remote = req.socket.remoteAddress ?? ''
-  if (remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1') {
-    return true
-  }
-  return false
+  return remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
 }
 
 function parseCookies(header: string | undefined): Record<string, string> {
@@ -282,48 +279,125 @@ function renderLoginPage(bootstrapAdminUsername: string): string {
 <title>Codex Web Local &mdash; Login</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0a0a0a;color:#e5e5e5;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1rem}
-.card{background:#171717;border:1px solid #262626;border-radius:12px;padding:2rem;width:100%;max-width:400px}
-h1{font-size:1.25rem;font-weight:600;margin-bottom:1.5rem;text-align:center;color:#fafafa}
-label{display:block;font-size:.875rem;color:#a3a3a3;margin-bottom:.5rem}
-.field{margin-bottom:1rem}
-input{width:100%;padding:.625rem .75rem;background:#0a0a0a;border:1px solid #404040;border-radius:8px;color:#fafafa;font-size:1rem;outline:none;transition:border-color .15s}
-input:focus{border-color:#3b82f6}
-button{width:100%;padding:.625rem;margin-top:.25rem;background:#3b82f6;color:#fff;border:none;border-radius:8px;font-size:.9375rem;font-weight:500;cursor:pointer;transition:background .15s}
-button:hover{background:#2563eb}
-.error{color:#ef4444;font-size:.8125rem;margin-top:.75rem;text-align:center;display:none}
-.hint{color:#737373;font-size:.75rem;margin-top:.5rem;text-align:center}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#09090b;color:#e4e4e7;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:1.25rem}
+.shell{width:100%;max-width:960px;display:grid;gap:1rem}
+.hero{display:flex;flex-direction:column;gap:.35rem;align-items:flex-start}
+.hero h1{font-size:1.65rem;font-weight:700;color:#fafafa}
+.hero p{color:#a1a1aa;font-size:.95rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem}
+.card{background:#111114;border:1px solid #27272a;border-radius:16px;padding:1.5rem;box-shadow:0 20px 40px rgba(0,0,0,.25)}
+.card h2{font-size:1.125rem;font-weight:600;color:#fafafa;margin-bottom:.35rem}
+.card p{color:#a1a1aa;font-size:.875rem;margin-bottom:1rem;line-height:1.5}
+label{display:block;font-size:.875rem;color:#c4c4c5;margin-bottom:.45rem}
+.field{margin-bottom:.95rem}
+input{width:100%;padding:.7rem .85rem;background:#09090b;border:1px solid #3f3f46;border-radius:10px;color:#fafafa;font-size:1rem;outline:none;transition:border-color .15s,box-shadow .15s}
+input:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.2)}
+button{width:100%;padding:.7rem .85rem;margin-top:.15rem;background:#2563eb;color:#fff;border:none;border-radius:10px;font-size:.95rem;font-weight:600;cursor:pointer;transition:background .15s}
+button:hover{background:#1d4ed8}
+button.secondary{background:#27272a}
+button.secondary:hover{background:#3f3f46}
+.hint{color:#71717a;font-size:.78rem;margin-top:.55rem;line-height:1.45}
+.message{font-size:.85rem;margin-top:.85rem;display:none;line-height:1.45}
+.message.error{color:#f87171}
+.message.success{color:#4ade80}
+.message.visible{display:block}
+.pending-note{display:none;margin-top:.85rem;padding:.75rem .85rem;border-radius:10px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.28);color:#86efac;font-size:.85rem;line-height:1.5}
+.pending-note.visible{display:block}
+@media (max-width: 720px){body{padding:1rem}.card{padding:1.25rem}}
 </style>
 </head>
 <body>
-<div class="card">
-<h1>Codex Web Local</h1>
-<form id="f">
-<div class="field">
-<label for="username">Username</label>
-<input id="username" name="username" autocomplete="username" placeholder="${escapedUsername}">
-</div>
-<div class="field">
-<label for="pw">Password</label>
-<input id="pw" name="password" type="password" autocomplete="current-password" autofocus required>
-</div>
-<button type="submit">Sign in</button>
-<p class="hint">Leave username blank to use ${escapedUsername} login compatibility mode.</p>
-<p class="error" id="err">Invalid credentials</p>
-</form>
+<div class="shell">
+  <header class="hero">
+    <h1>Codex Web Local</h1>
+    <p>Sign in to the Hub or request access for a new account.</p>
+  </header>
+  <div class="grid">
+    <section class="card">
+      <h2>Sign in</h2>
+      <p>Use your approved Hub account to access registered servers, projects, and threads.</p>
+      <form id="login-form">
+        <div class="field">
+          <label for="username">Username</label>
+          <input id="username" name="username" autocomplete="username" placeholder="${escapedUsername}">
+        </div>
+        <div class="field">
+          <label for="pw">Password</label>
+          <input id="pw" name="password" type="password" autocomplete="current-password" autofocus required>
+        </div>
+        <button type="submit">Sign in</button>
+        <p class="hint">Leave username blank to use ${escapedUsername} login compatibility mode.</p>
+        <p class="message error" id="login-error"></p>
+      </form>
+    </section>
+    <section class="card">
+      <h2>Request access</h2>
+      <p>Create a user request. An administrator must approve it before you can sign in.</p>
+      <form id="register-form">
+        <div class="field">
+          <label for="register-username">Create username</label>
+          <input id="register-username" name="username" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="register-password">Create password</label>
+          <input id="register-password" name="password" type="password" autocomplete="new-password" required>
+        </div>
+        <button type="submit" class="secondary">Request access</button>
+        <div class="pending-note" id="register-success">Your access request is pending admin approval.</div>
+        <p class="message error" id="register-error"></p>
+      </form>
+    </section>
+  </div>
 </div>
 <script>
-const form=document.getElementById('f');
-const errEl=document.getElementById('err');
+const loginForm=document.getElementById('login-form');
+const registerForm=document.getElementById('register-form');
+const loginError=document.getElementById('login-error');
+const registerError=document.getElementById('register-error');
+const registerSuccess=document.getElementById('register-success');
 const usernameEl=document.getElementById('username');
 const pwEl=document.getElementById('pw');
-form.addEventListener('submit',async e=>{
-  e.preventDefault();
-  errEl.style.display='none';
+const registerUsernameEl=document.getElementById('register-username');
+const registerPasswordEl=document.getElementById('register-password');
+
+function setMessage(el, message, visible){
+  if(!el) return;
+  el.textContent=message || '';
+  el.classList.toggle('visible', !!visible);
+}
+
+loginForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  setMessage(loginError, '', false);
   const payload={password:pwEl.value};
   if(usernameEl.value.trim()){payload.username=usernameEl.value.trim();}
   const res=await fetch('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-  if(res.ok){window.location.reload()}else{errEl.style.display='block';pwEl.value='';pwEl.focus()}
+  const body=await res.json().catch(()=>({}));
+  if(res.ok){window.location.reload();return;}
+  const fallback=res.status===403?'Your account is waiting for admin approval.':'Invalid credentials';
+  const message=typeof body.error==='string'&&body.error.trim()?body.error:fallback;
+  setMessage(loginError, message, true);
+  pwEl.value='';
+  pwEl.focus();
+});
+
+registerForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  setMessage(registerError, '', false);
+  registerSuccess.classList.remove('visible');
+  const payload={username:registerUsernameEl.value.trim(),password:registerPasswordEl.value};
+  const res=await fetch('/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const body=await res.json().catch(()=>({}));
+  if(res.ok){
+    registerUsernameEl.value='';
+    registerPasswordEl.value='';
+    registerSuccess.classList.add('visible');
+    usernameEl.value=payload.username;
+    pwEl.focus();
+    return;
+  }
+  const message=typeof body.error==='string'&&body.error.trim()?body.error:'Unable to submit access request';
+  setMessage(registerError, message, true);
 });
 </script>
 </body>
@@ -417,11 +491,7 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
       writeRateLimitedResponse(res, signupLimitDecision.retryAfterSeconds, 'Too many signup attempts. Try again later.')
       return
     }
-    incrementRateLimitAttempt(
-      signupRateLimitByIp,
-      remoteAddressKey,
-      { windowMs: SIGNUP_RATE_LIMIT_WINDOW_MS },
-    )
+    incrementRateLimitAttempt(signupRateLimitByIp, remoteAddressKey, { windowMs: SIGNUP_RATE_LIMIT_WINDOW_MS })
 
     const body = await readJsonBody(req)
     if (!body) {
@@ -447,11 +517,12 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
     }
 
     const role: UserRole = allowBootstrapSignup ? 'admin' : requestedRole
-
     const created = await createUser({
       username,
       password,
       role,
+      approvalStatus: 'approved',
+      approvedByUserId: currentUser?.id,
     })
 
     if (!currentUser) {
@@ -461,6 +532,39 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
     }
 
     res.status(201).json({ ok: true, user: created })
+  }
+
+  async function handleRegister(req: Request, res: Response): Promise<void> {
+    const remoteAddressKey = normalizeRateLimitKey(getRemoteAddress(req))
+    const signupLimitDecision = evaluateRateLimit(
+      signupRateLimitByIp,
+      remoteAddressKey,
+      {
+        maxAttempts: SIGNUP_RATE_LIMIT_MAX_PER_IP,
+        windowMs: SIGNUP_RATE_LIMIT_WINDOW_MS,
+        blockMs: SIGNUP_RATE_LIMIT_BLOCK_MS,
+      },
+    )
+    if (signupLimitDecision.limited) {
+      writeRateLimitedResponse(res, signupLimitDecision.retryAfterSeconds, 'Too many signup attempts. Try again later.')
+      return
+    }
+    incrementRateLimitAttempt(signupRateLimitByIp, remoteAddressKey, { windowMs: SIGNUP_RATE_LIMIT_WINDOW_MS })
+
+    const body = await readJsonBody(req)
+    if (!body) {
+      res.status(400).json({ error: 'Invalid body: expected object' })
+      return
+    }
+
+    const created = await createUser({
+      username: toUsername(body.username),
+      password: toPassword(body.password),
+      role: 'user',
+      approvalStatus: 'pending',
+    })
+
+    res.status(202).json({ ok: true, status: 'pending', user: created })
   }
 
   async function handleLogin(req: Request, res: Response): Promise<void> {
@@ -479,29 +583,21 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
 
     const remoteAddressKey = normalizeRateLimitKey(getRemoteAddress(req))
     const usernameKey = normalizeRateLimitKey(username || bootstrapAdminUsername)
-    const ipLimitDecision = evaluateRateLimit(
-      loginRateLimitByIp,
-      remoteAddressKey,
-      {
-        maxAttempts: LOGIN_RATE_LIMIT_MAX_PER_IP,
-        windowMs: LOGIN_RATE_LIMIT_WINDOW_MS,
-        blockMs: LOGIN_RATE_LIMIT_BLOCK_MS,
-      },
-    )
+    const ipLimitDecision = evaluateRateLimit(loginRateLimitByIp, remoteAddressKey, {
+      maxAttempts: LOGIN_RATE_LIMIT_MAX_PER_IP,
+      windowMs: LOGIN_RATE_LIMIT_WINDOW_MS,
+      blockMs: LOGIN_RATE_LIMIT_BLOCK_MS,
+    })
     if (ipLimitDecision.limited) {
       writeRateLimitedResponse(res, ipLimitDecision.retryAfterSeconds, 'Too many login attempts from this IP. Try again later.')
       return
     }
 
-    const usernameLimitDecision = evaluateRateLimit(
-      loginRateLimitByUsername,
-      usernameKey,
-      {
-        maxAttempts: LOGIN_RATE_LIMIT_MAX_PER_USERNAME,
-        windowMs: LOGIN_RATE_LIMIT_WINDOW_MS,
-        blockMs: LOGIN_RATE_LIMIT_BLOCK_MS,
-      },
-    )
+    const usernameLimitDecision = evaluateRateLimit(loginRateLimitByUsername, usernameKey, {
+      maxAttempts: LOGIN_RATE_LIMIT_MAX_PER_USERNAME,
+      windowMs: LOGIN_RATE_LIMIT_WINDOW_MS,
+      blockMs: LOGIN_RATE_LIMIT_BLOCK_MS,
+    })
     if (usernameLimitDecision.limited) {
       writeRateLimitedResponse(
         res,
@@ -511,10 +607,7 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
       return
     }
 
-    const usernameCandidates = username
-      ? [username]
-      : [bootstrapAdminUsername]
-
+    const usernameCandidates = username ? [username] : [bootstrapAdminUsername]
     if (!username) {
       const existingUsers = await listUsers()
       if (existingUsers.length === 1 && existingUsers[0].username !== bootstrapAdminUsername) {
@@ -523,25 +616,21 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
     }
 
     let signedInUser: UserProfile | null = null
+    let pendingApprovalUser: UserProfile | null = null
     for (const usernameCandidate of usernameCandidates) {
-      const authenticated = await authenticateUser(usernameCandidate, password)
-      if (authenticated) {
-        signedInUser = authenticated
+      const authenticated = await attemptAuthenticateUser(usernameCandidate, password)
+      if (authenticated.status === 'authenticated') {
+        signedInUser = authenticated.user
         break
+      }
+      if (authenticated.status === 'pending') {
+        pendingApprovalUser = authenticated.user
       }
     }
 
-    if (!signedInUser) {
-      incrementRateLimitAttempt(
-        loginRateLimitByIp,
-        remoteAddressKey,
-        { windowMs: LOGIN_RATE_LIMIT_WINDOW_MS },
-      )
-      incrementRateLimitAttempt(
-        loginRateLimitByUsername,
-        usernameKey,
-        { windowMs: LOGIN_RATE_LIMIT_WINDOW_MS },
-      )
+    if (!signedInUser && !pendingApprovalUser) {
+      incrementRateLimitAttempt(loginRateLimitByIp, remoteAddressKey, { windowMs: LOGIN_RATE_LIMIT_WINDOW_MS })
+      incrementRateLimitAttempt(loginRateLimitByUsername, usernameKey, { windowMs: LOGIN_RATE_LIMIT_WINDOW_MS })
       res.status(401).json({ error: 'Invalid credentials' })
       return
     }
@@ -549,13 +638,18 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
     clearRateLimit(loginRateLimitByIp, remoteAddressKey)
     clearRateLimit(loginRateLimitByUsername, usernameKey)
 
-    const token = createSession(signedInUser.id)
+    if (!signedInUser && pendingApprovalUser) {
+      res.status(403).json({ error: 'Your account is waiting for admin approval.', user: pendingApprovalUser })
+      return
+    }
+
+    const token = createSession(signedInUser!.id)
     res.setHeader('Set-Cookie', buildSessionCookie(req, token))
     setRequestAuthenticatedUser(req, signedInUser)
     res.json({ ok: true, user: signedInUser })
   }
 
-  async function handleSession(req: Request, res: Response, currentUser: UserProfile | null): Promise<void> {
+  async function handleSession(_req: Request, res: Response, currentUser: UserProfile | null): Promise<void> {
     if (!currentUser) {
       res.status(200).json({ authenticated: false })
       return
@@ -583,6 +677,11 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
 
     if (req.method === 'POST' && path === '/auth/signup') {
       await handleSignup(req, res, currentUser)
+      return
+    }
+
+    if (req.method === 'POST' && path === '/auth/register') {
+      await handleRegister(req, res)
       return
     }
 
