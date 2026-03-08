@@ -16,6 +16,8 @@ This fork is operated as a central **Hub** service with per-user servers, Connec
 - **SQLite-backed Hub persistence** for users and Hub state
 - **Approval-gated signup flow** with admin review and per-user isolation
 - **Hook inbox + alert badges** for pending app-server hooks
+- **Connector-scoped Skills Hub** browse/install/uninstall flows
+- **PWA browser notifications** for hook approvals with service-worker push registration
 - **Outbound-only Connector model** for remote Codex hosts
 - **Bootstrap hardening**: one-time install token -> durable runtime credential
 - **SQLite-backed Hub persistence** for users and Hub state (`$CODEX_HOME/codexui/hub.sqlite`)
@@ -186,6 +188,15 @@ Persisted files inside `CODEX_HOME`:
 7. Start `codexui-connector connect`
 8. Confirm status, project count, and thread count in Settings
 
+### Browser notifications for hook approvals
+
+Settings now includes a **Browser notifications** card that:
+
+- registers a service worker + push subscription for the current browser
+- stores the subscription per Hub user
+- delivers hook approval notifications back to the browser/PWA
+- supports Android/desktop Chromium browsers and iPhone Home Screen web apps (when push is available)
+
 ### Remote host example
 
 ```bash
@@ -254,6 +265,7 @@ Useful environment variables:
 - [`docs/connector-service-management.md`](docs/connector-service-management.md) — systemd / PM2 운영 가이드
 - [`docs/bootstrap-admin-setup-report.md`](docs/bootstrap-admin-setup-report.md) — hash-only bootstrap and forced first-login rotation report
 - [`docs/explorer-hooks-sqlite-approval-report.md`](docs/explorer-hooks-sqlite-approval-report.md) — server-scoped explorer, hook inbox, SQLite auth, and approval flow report
+- [`docs/skills-hub-hooks-pwa-report.md`](docs/skills-hub-hooks-pwa-report.md) — connector-scoped Skills Hub, relay hook fixes, PWA notifications, and live Docker validation
 - [`docs/implementation-report.md`](docs/implementation-report.md) — phase-by-phase implementation summary
 - [`docs/connector-bootstrap-hardening-report.md`](docs/connector-bootstrap-hardening-report.md) — connector bootstrap hardening details
 - [`docs/multi-server-test-workflow.md`](docs/multi-server-test-workflow.md) — disposable multi-server Docker lab stack

@@ -42,6 +42,7 @@ It supports:
 - delete Connector
 - confirm online/offline state
 - inspect project/thread counts
+- enable / disable browser push notifications for hook approvals
 
 ## Lifecycle states
 
@@ -113,6 +114,26 @@ When a Connector is online, the Hub can derive:
 - thread count
 
 The latest successful stats snapshot is cached in the Connector registry and marked stale if the Connector later goes offline.
+
+## Browser notifications
+
+Settings also exposes a **Browser notifications** card backed by:
+
+- `GET /codex-api/pwa/config`
+- `GET /codex-api/pwa/subscriptions`
+- `POST /codex-api/pwa/subscriptions`
+- `DELETE /codex-api/pwa/subscriptions`
+
+This lets each signed-in user register the current browser/PWA as a hook notification target.
+
+## Connector-scoped Skills Hub
+
+The Skills Hub now follows the active Server / Connector scope for:
+
+- skills listing
+- installed skill detection
+- SKILL.md fetches
+- Connector-side install / uninstall over relay transport
 
 ## Related docs
 
