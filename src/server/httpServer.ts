@@ -46,14 +46,12 @@ export function createServer(options: ServerOptions = {}): ServerInstance {
   const app = express()
   const bridge = createCodexBridgeMiddleware()
 
-  // 1. Auth middleware (if a bootstrap credential is set)
-  if (options.password || options.passwordHash) {
-    app.use(createAuthMiddleware({
-      bootstrapAdminPassword: options.password,
-      bootstrapAdminPasswordHash: options.passwordHash,
-      bootstrapAdminUsername: options.bootstrapAdminUsername,
-    }))
-  }
+  // 1. Auth middleware
+  app.use(createAuthMiddleware({
+    bootstrapAdminPassword: options.password,
+    bootstrapAdminPasswordHash: options.passwordHash,
+    bootstrapAdminUsername: options.bootstrapAdminUsername,
+  }))
 
   // 2. Bridge middleware for /codex-api/*
   app.use(bridge)

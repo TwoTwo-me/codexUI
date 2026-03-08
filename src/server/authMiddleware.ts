@@ -5,6 +5,7 @@ import {
   UserStoreError,
   attemptAuthenticateUser,
   countUsers,
+  completeBootstrapAdminSetup,
   createUser,
   findUserById,
   listUsers,
@@ -436,8 +437,8 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
     ? options.bootstrapAdminPasswordHash.trim()
     : ''
 
-  if ((bootstrapAdminPassword ? 1 : 0) + (bootstrapAdminPasswordHash ? 1 : 0) !== 1) {
-    throw new Error('createAuthMiddleware requires exactly one bootstrap admin credential source.')
+  if (bootstrapAdminPassword) {
+    throw new Error('Plaintext bootstrap admin passwords are no longer supported. Use a password hash instead.')
   }
 
   const bootstrapAdminUsername =
@@ -449,10 +450,12 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
   const loginRateLimitByIp = new Map<string, RateLimitRecord>()
   const loginRateLimitByUsername = new Map<string, RateLimitRecord>()
   const signupRateLimitByIp = new Map<string, RateLimitRecord>()
-  const bootstrapCredential: BootstrapAdminCredential = bootstrapAdminPasswordHash
+  const bootstrapCredential: BootstrapAdminCredential | null = bootstrapAdminPasswordHash
     ? { passwordHash: bootstrapAdminPasswordHash }
-    : { password: bootstrapAdminPassword }
-  const bootstrapPromise = upsertBootstrapAdmin(bootstrapAdminUsername, bootstrapCredential)
+    : null
+  const bootstrapPromise = bootstrapCredential
+    ? upsertBootstrapAdmin(bootstrapAdminUsername, bootstrapCredential)
+    : Promise.resolve(null)
 
   async function resolveSessionUser(req: Request): Promise<UserProfile | null> {
     const cookies = parseCookies(req.headers.cookie)
@@ -676,6 +679,37 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
     res.status(200).json(buildSessionPayload(currentUser))
   }
 
+  async function handleBootstrapSetup(req: Request, res: Response, currentUser: UserProfile | null): Promise<void> {
+    if (!currentUser) {
+      res.status(401).json({ error: 'Authentication required' })
+      return
+    }
+    if (!isSetupRequiredUser(currentUser)) {
+      res.status(403).json({ error: 'Bootstrap admin setup is not required.' })
+      return
+    }
+
+    const body = await readJsonBody(req)
+    if (!body) {
+      res.status(400).json({ error: 'Invalid body: expected object' })
+      return
+    }
+
+    const record = asRecord(body)
+    const updatedUser = await completeBootstrapAdminSetup({
+      userId: currentUser.id,
+      currentPassword: typeof record?.currentPassword === 'string' ? record.currentPassword : '',
+      newUsername: typeof record?.newUsername === 'string' ? record.newUsername : '',
+      newPassword: typeof record?.newPassword === 'string' ? record.newPassword : '',
+    })
+
+    setRequestAuthenticatedUser(req, updatedUser)
+    res.status(200).json({
+      ok: true,
+      ...buildSessionPayload(updatedUser),
+    })
+  }
+
   async function handleLogout(req: Request, res: Response): Promise<void> {
     clearSession(req)
     setRequestAuthenticatedUser(req, null)
@@ -707,6 +741,11 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
 
     if (req.method === 'GET' && path === '/auth/session') {
       await handleSession(req, res, currentUser)
+      return
+    }
+
+    if (req.method === 'POST' && path === '/auth/bootstrap/complete') {
+      await handleBootstrapSetup(req, res, currentUser)
       return
     }
 

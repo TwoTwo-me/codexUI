@@ -39,26 +39,16 @@ if [ "$plaintext_sources" -gt 1 ]; then
   exit 1
 fi
 
-if [ "$hash_sources" -gt 0 ] && [ "$plaintext_sources" -gt 0 ]; then
-  echo "[codexui-entrypoint] Bootstrap admin password hash settings cannot be combined with plaintext password settings." >&2
+if [ "$plaintext_sources" -gt 0 ]; then
+  echo "[codexui-entrypoint] Plaintext bootstrap admin password settings are no longer supported. Use CODEXUI_ADMIN_PASSWORD_HASH(_FILE)." >&2
   exit 1
 fi
 
 PASSWORD_HASH=""
-PASSWORD=""
 if [ -n "$PASSWORD_HASH_FILE" ]; then
   PASSWORD_HASH="$(read_secret_file "$PASSWORD_HASH_FILE")"
 elif [ -n "$PASSWORD_HASH_ENV" ]; then
   PASSWORD_HASH="$PASSWORD_HASH_ENV"
-elif [ -n "$PASSWORD_FILE" ]; then
-  PASSWORD="$(read_secret_file "$PASSWORD_FILE")"
-else
-  PASSWORD="$PASSWORD_ENV"
-fi
-
-if [ -z "$PASSWORD_HASH" ] && [ -z "$PASSWORD" ]; then
-  echo "[codexui-entrypoint] Set one of CODEXUI_ADMIN_PASSWORD_HASH(_FILE) or CODEXUI_ADMIN_PASSWORD(_FILE) before starting the hub." >&2
-  exit 1
 fi
 
 mkdir -p "${CODEX_HOME:-/data/codex-home}" /workspace
@@ -75,8 +65,6 @@ set -- node dist-cli/index.js \
 
 if [ -n "$PASSWORD_HASH" ]; then
   set -- "$@" --password-hash "$PASSWORD_HASH"
-else
-  set -- "$@" --password "$PASSWORD"
 fi
 
 exec "$@"

@@ -215,3 +215,70 @@ test('bootstrap admin session is setup-required and blocks codex-api access befo
     await server.stop()
   }
 })
+
+test('bootstrap admin can complete setup, unlock codex-api access, and preserve rotated credentials across restart', async () => {
+  const bootstrapPassword = 'bootstrap-secret-pass-2'
+  const passwordHash = await generatePasswordHash(bootstrapPassword)
+  const codeHome = await mkdtemp(join(tmpdir(), 'codexui-bootstrap-complete-'))
+  const server = await startServer({ passwordHash, codeHome, username: 'admin' })
+
+  try {
+    const loginResponse = await postJson(`${server.baseUrl}/auth/login`, {
+      username: 'admin',
+      password: bootstrapPassword,
+    })
+    assert.equal(loginResponse.status, 200)
+    const cookie = loginResponse.headers.get('set-cookie')
+    assert.ok(cookie)
+
+    const completeResponse = await postJson(
+      `${server.baseUrl}/auth/bootstrap/complete`,
+      {
+        currentPassword: bootstrapPassword,
+        newUsername: 'primary-admin',
+        newPassword: 'rotated-secret-pass-2',
+      },
+      { Cookie: cookie },
+    )
+    assert.equal(completeResponse.status, 200)
+    const completeBody = await completeResponse.json()
+    assert.equal(completeBody.setupRequired, false)
+    assert.equal(completeBody.user.username, 'primary-admin')
+
+    const unlockedApiResponse = await fetch(`${server.baseUrl}/codex-api/servers`, {
+      headers: {
+        Accept: 'application/json',
+        Cookie: cookie,
+      },
+    })
+    assert.equal(unlockedApiResponse.status, 200)
+
+    const staleLoginResponse = await postJson(`${server.baseUrl}/auth/login`, {
+      username: 'admin',
+      password: bootstrapPassword,
+    })
+    assert.equal(staleLoginResponse.status, 401)
+  } finally {
+    await server.stop()
+  }
+
+  const restartedServer = await startServer({ passwordHash, codeHome, username: 'admin' })
+  try {
+    const staleLoginResponse = await postJson(`${restartedServer.baseUrl}/auth/login`, {
+      username: 'admin',
+      password: bootstrapPassword,
+    })
+    assert.equal(staleLoginResponse.status, 401)
+
+    const rotatedLoginResponse = await postJson(`${restartedServer.baseUrl}/auth/login`, {
+      username: 'primary-admin',
+      password: 'rotated-secret-pass-2',
+    })
+    assert.equal(rotatedLoginResponse.status, 200)
+    const rotatedLoginBody = await rotatedLoginResponse.json()
+    assert.equal(rotatedLoginBody.setupRequired, false)
+    assert.equal(rotatedLoginBody.user.username, 'primary-admin')
+  } finally {
+    await restartedServer.stop()
+  }
+})

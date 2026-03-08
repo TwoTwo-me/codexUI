@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url'
 import { dirname } from 'node:path'
 import { Command } from 'commander'
 import { createServer as createApp } from '../server/httpServer.js'
-import { generatePassword } from '../server/password.js'
 import { createPasswordHash, isSupportedPasswordHash } from '../server/userStore.js'
 
 const program = new Command().name('codexui').description('Web interface for Codex app-server')
@@ -91,7 +90,6 @@ function ensureTermuxCodexInstalled(): string | null {
 
 type BootstrapCredential =
   | { enabled: false }
-  | { enabled: true; kind: 'password'; value: string; source: 'cli' | 'env' | 'generated' }
   | { enabled: true; kind: 'hash'; value: string; source: 'cli' | 'env' }
 
 function resolveBootstrapAdminUsername(input?: string): string {
@@ -148,21 +146,20 @@ function resolveBootstrapCredential(options: {
     throw new Error('CODEXUI_ADMIN_PASSWORD and CODEXUI_ADMIN_PASSWORD_HASH cannot both be set.')
   }
 
+  if (cliPassword) {
+    throw new Error('Plaintext bootstrap admin passwords are not supported. Use --password-hash.')
+  }
+
+  if (envPassword) {
+    throw new Error('CODEXUI_ADMIN_PASSWORD is no longer supported. Use CODEXUI_ADMIN_PASSWORD_HASH.')
+  }
+
   if (cliPasswordHash) {
     assertSupportedPasswordHash(cliPasswordHash, '--password-hash')
     return {
       enabled: true,
       kind: 'hash',
       value: cliPasswordHash,
-      source: 'cli',
-    }
-  }
-
-  if (cliPassword) {
-    return {
-      enabled: true,
-      kind: 'password',
-      value: cliPassword,
       source: 'cli',
     }
   }
@@ -177,21 +174,7 @@ function resolveBootstrapCredential(options: {
     }
   }
 
-  if (envPassword) {
-    return {
-      enabled: true,
-      kind: 'password',
-      value: envPassword,
-      source: 'env',
-    }
-  }
-
-  return {
-    enabled: true,
-    kind: 'password',
-    value: generatePassword(),
-    source: 'generated',
-  }
+  return { enabled: false }
 }
 
 function shouldOpenBrowser(): boolean {
@@ -316,11 +299,7 @@ async function startServer(options: {
 
   if (bootstrapCredential.enabled) {
     lines.push(`  Username: ${bootstrapAdminUsername}`)
-    if (bootstrapCredential.kind === 'password') {
-      lines.push(`  Password: ${bootstrapCredential.value}`)
-    } else {
-      lines.push('  Password: configured via precomputed hash (not displayed)')
-    }
+    lines.push('  Password: configured via precomputed hash (not displayed)')
   }
 
   if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
@@ -394,9 +373,9 @@ program
   .option('-p, --port <port>', 'port to listen on', process.env.CODEXUI_PORT?.trim() || '3000')
   .option('--host <host>', 'host/interface to bind (default: 127.0.0.1 or CODEXUI_BIND_HOST)')
   .option('--username <username>', 'bootstrap admin username (default: admin or CODEXUI_ADMIN_USERNAME)')
-  .option('--password <pass>', 'set a specific password')
+  .option('--password <pass>', 'deprecated: plaintext bootstrap passwords are no longer supported')
   .option('--password-hash <hash>', 'set a precomputed bootstrap admin password hash')
-  .option('--no-password', 'disable password protection')
+  .option('--no-password', 'start without injecting a bootstrap credential')
   .action(async (opts: { port: string; host?: string; username?: string; password: string | boolean; passwordHash?: string }) => {
     await startServer(opts)
   })

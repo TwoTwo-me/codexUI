@@ -646,6 +646,77 @@ export async function approveUser(userId: string, approvedByUserId: string): Pro
   })
 }
 
+export async function completeBootstrapAdminSetup(input: {
+  userId: string
+  currentPassword: string
+  newUsername: string
+  newPassword: string
+}): Promise<UserProfile> {
+  const normalizedUserId = input.userId.trim()
+  const normalizedNewUsername = normalizeUsername(input.newUsername)
+  const currentPassword = input.currentPassword
+  const newPassword = input.newPassword
+
+  if (!normalizedUserId) {
+    throw new UserStoreError('invalid_user_id', 'User id is required.', 400)
+  }
+
+  assertNonEmptyPassword(currentPassword)
+  assertValidUsername(normalizedNewUsername)
+  assertValidPassword(newPassword)
+
+  return enqueueMutation(async () => {
+    importLegacyUsersIfNeeded()
+
+    const currentRow = getHubDatabase().prepare('SELECT * FROM users WHERE id = ?').get(normalizedUserId) as Record<string, unknown> | undefined
+    if (!currentRow) {
+      throw new UserStoreError('user_not_found', `User "${normalizedUserId}" was not found.`, 404)
+    }
+
+    const currentUser = rowToStoredUser(currentRow)
+    if (!currentUser.isBootstrapAdmin || currentUser.bootstrapState !== 'pending_setup') {
+      throw new UserStoreError('bootstrap_setup_not_required', 'Bootstrap admin setup is not required for this account.', 403)
+    }
+
+    const validCurrentPassword = await verifyPassword(currentPassword, currentUser.passwordHash)
+    if (!validCurrentPassword) {
+      throw new UserStoreError('invalid_credentials', 'Current password is incorrect.', 401)
+    }
+
+    if (normalizedNewUsername.toLowerCase() !== currentUser.usernameLower) {
+      const existingUsernameRow = findUserByUsernameRow(normalizedNewUsername)
+      if (existingUsernameRow && existingUsernameRow.id !== currentUser.id) {
+        throw new UserStoreError('user_exists', `User "${normalizedNewUsername}" already exists.`, 409)
+      }
+    }
+
+    const nowIso = new Date().toISOString()
+    const nextPasswordHash = await hashPassword(newPassword)
+    getHubDatabase().prepare(`
+      UPDATE users
+      SET username = ?,
+          username_lower = ?,
+          password_hash = ?,
+          must_change_username = 0,
+          must_change_password = 0,
+          bootstrap_state = 'consumed',
+          setup_completed_at_iso = ?,
+          updated_at_iso = ?
+      WHERE id = ?
+    `).run(
+      normalizedNewUsername,
+      normalizedNewUsername.toLowerCase(),
+      nextPasswordHash,
+      nowIso,
+      nowIso,
+      currentUser.id,
+    )
+
+    const updatedRow = getHubDatabase().prepare('SELECT * FROM users WHERE id = ?').get(currentUser.id) as Record<string, unknown>
+    return toUserProfile(rowToStoredUser(updatedRow))
+  })
+}
+
 export async function upsertBootstrapAdmin(
   username: string,
   credential: string | BootstrapAdminCredential,
@@ -657,6 +728,16 @@ export async function upsertBootstrapAdmin(
   return enqueueMutation(async () => {
     importLegacyUsersIfNeeded()
     const nowIso = new Date().toISOString()
+    const consumedBootstrapRow = getHubDatabase().prepare(`
+      SELECT * FROM users
+      WHERE is_bootstrap_admin = 1 AND bootstrap_state = 'consumed'
+      ORDER BY updated_at_iso DESC
+      LIMIT 1
+    `).get() as Record<string, unknown> | undefined
+    if (consumedBootstrapRow) {
+      return toUserProfile(rowToStoredUser(consumedBootstrapRow))
+    }
+
     const existingRow = findUserByUsernameRow(normalizedUsername)
     const passwordHash = ('passwordHash' in normalizedCredential && typeof normalizedCredential.passwordHash === 'string')
       ? normalizedCredential.passwordHash

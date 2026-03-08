@@ -175,12 +175,13 @@ async function startServer({ args = [], env = {}, codeHome: explicitCodeHome } =
   }
 }
 
-async function postJson(url, payload) {
+async function postJson(url, payload, headers = {}) {
   return fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      ...headers,
     },
     body: JSON.stringify(payload),
   })
@@ -268,6 +269,13 @@ test('server persists registered servers across restart using sqlite-backed hub 
     const adminCookie = loginResponse.headers.get('set-cookie')
     assert.ok(adminCookie)
 
+    const completeResponse = await postJson(`${firstServer.baseUrl}/auth/bootstrap/complete`, {
+      currentPassword: plaintextPassword,
+      newUsername: 'primary-hash-admin',
+      newPassword: 'sqlite-state-pass-2',
+    }, { Cookie: adminCookie })
+    assert.equal(completeResponse.status, 200)
+
     const registerServerResponse = await fetch(`${firstServer.baseUrl}/codex-api/servers`, {
       method: 'POST',
       headers: {
@@ -300,8 +308,8 @@ test('server persists registered servers across restart using sqlite-backed hub 
 
   try {
     const loginResponse = await postJson(`${secondServer.baseUrl}/auth/login`, {
-      username: 'hash-admin',
-      password: plaintextPassword,
+      username: 'primary-hash-admin',
+      password: 'sqlite-state-pass-2',
     })
     assert.equal(loginResponse.status, 200)
     const adminCookie = loginResponse.headers.get('set-cookie')
@@ -399,5 +407,33 @@ test('hub entrypoint translates password hash settings into --password-hash and 
     },
   })
   assert.notEqual(mixedResult.exitCode, 0)
-  assert.match(`${mixedResult.stdout}\n${mixedResult.stderr}`, /cannot be combined/i)
+  assert.match(`${mixedResult.stdout}\n${mixedResult.stderr}`, /no longer supported|plaintext bootstrap/i)
+})
+
+test('server rejects plaintext bootstrap sources from CLI and environment', async () => {
+  const cliResult = await runCommand([
+    'dist-cli/index.js',
+    '--host',
+    '127.0.0.1',
+    '--port',
+    String(await getAvailablePort()),
+    '--password',
+    'plaintext-secret-2',
+  ])
+  assert.notEqual(cliResult.exitCode, 0)
+  assert.match(`${cliResult.stdout}\n${cliResult.stderr}`, /plaintext bootstrap.*not supported|--password.*not supported/i)
+
+  const envResult = await runCommand([
+    'dist-cli/index.js',
+    '--host',
+    '127.0.0.1',
+    '--port',
+    String(await getAvailablePort()),
+  ], {
+    env: {
+      CODEXUI_ADMIN_PASSWORD: 'plaintext-secret-3',
+    },
+  })
+  assert.notEqual(envResult.exitCode, 0)
+  assert.match(`${envResult.stdout}\n${envResult.stderr}`, /CODEXUI_ADMIN_PASSWORD.*no longer supported|plaintext bootstrap/i)
 })
