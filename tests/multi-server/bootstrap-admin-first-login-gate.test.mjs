@@ -282,3 +282,175 @@ test('bootstrap admin can complete setup, unlock codex-api access, and preserve 
     await restartedServer.stop()
   }
 })
+
+test('bootstrap admin browser navigation redirects to setup route until setup completes', async () => {
+  const plaintextPassword = 'bootstrap-secret-pass-3'
+  const passwordHash = await generatePasswordHash(plaintextPassword)
+  const server = await startServer({ passwordHash, username: 'admin' })
+
+  try {
+    const loginResponse = await postJson(`${server.baseUrl}/auth/login`, {
+      username: 'admin',
+      password: plaintextPassword,
+    })
+    assert.equal(loginResponse.status, 200)
+    const cookie = loginResponse.headers.get('set-cookie')
+    assert.ok(cookie)
+
+    const redirectedResponse = await fetch(`${server.baseUrl}/`, {
+      headers: {
+        Accept: 'text/html',
+        Cookie: cookie,
+      },
+      redirect: 'manual',
+    })
+    assert.equal(redirectedResponse.status, 302)
+    assert.equal(redirectedResponse.headers.get('location'), '/setup/bootstrap-admin')
+
+    const setupRouteResponse = await fetch(`${server.baseUrl}/setup/bootstrap-admin`, {
+      headers: {
+        Accept: 'text/html',
+        Cookie: cookie,
+      },
+    })
+    assert.equal(setupRouteResponse.status, 200)
+  } finally {
+    await server.stop()
+  }
+})
+
+test('setup-required bootstrap admin is redirected to setup route for HTML navigation', async () => {
+  const bootstrapPassword = 'bootstrap-secret-pass-3'
+  const passwordHash = await generatePasswordHash(bootstrapPassword)
+  const server = await startServer({ passwordHash, username: 'admin' })
+
+  try {
+    const loginResponse = await postJson(`${server.baseUrl}/auth/login`, {
+      username: 'admin',
+      password: bootstrapPassword,
+    })
+    assert.equal(loginResponse.status, 200)
+    const cookie = loginResponse.headers.get('set-cookie')
+    assert.ok(cookie)
+
+    const redirectedHome = await fetch(`${server.baseUrl}/`, {
+      headers: {
+        Accept: 'text/html',
+        Cookie: cookie,
+      },
+      redirect: 'manual',
+    })
+    assert.equal(redirectedHome.status, 302)
+    assert.equal(redirectedHome.headers.get('location'), '/setup/bootstrap-admin')
+
+    const redirectedSettings = await fetch(`${server.baseUrl}/settings`, {
+      headers: {
+        Accept: 'text/html',
+        Cookie: cookie,
+      },
+      redirect: 'manual',
+    })
+    assert.equal(redirectedSettings.status, 302)
+    assert.equal(redirectedSettings.headers.get('location'), '/setup/bootstrap-admin')
+
+    const setupRouteResponse = await fetch(`${server.baseUrl}/setup/bootstrap-admin`, {
+      headers: {
+        Accept: 'text/html',
+        Cookie: cookie,
+      },
+      redirect: 'manual',
+    })
+    assert.equal(setupRouteResponse.status, 200)
+  } finally {
+    await server.stop()
+  }
+})
+
+async function startServerWithoutBootstrap({ codeHome } = {}) {
+  const port = await getAvailablePort()
+  const resolvedCodeHome = codeHome ?? await mkdtemp(join(tmpdir(), 'codexui-bootstrapless-'))
+  const child = spawn('node', ['dist-cli/index.js', '--host', '127.0.0.1', '--port', String(port), '--no-password'], {
+    cwd: repoRoot,
+    env: createBaseEnv({
+      CODEX_HOME: resolvedCodeHome,
+    }),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  const outputRef = { stdout: '', stderr: '' }
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', (chunk) => {
+    outputRef.stdout += chunk
+  })
+  child.stderr.on('data', (chunk) => {
+    outputRef.stderr += chunk
+  })
+
+  const baseUrl = `http://127.0.0.1:${String(port)}`
+  await waitForServerReady(baseUrl, child, outputRef)
+
+  return {
+    baseUrl,
+    codeHome: resolvedCodeHome,
+    async stop() {
+      if (child.exitCode !== null) return
+      child.kill('SIGTERM')
+      await new Promise((resolvePromise) => child.once('close', resolvePromise))
+    },
+  }
+}
+
+test('rotated admin can log back in after restart with no bootstrap env or hash configured', async () => {
+  const bootstrapPassword = 'bootstrap-secret-pass-4'
+  const passwordHash = await generatePasswordHash(bootstrapPassword)
+  const codeHome = await mkdtemp(join(tmpdir(), 'codexui-bootstrapless-restart-'))
+  const bootstrapServer = await startServer({ passwordHash, codeHome, username: 'admin' })
+
+  try {
+    const loginResponse = await postJson(`${bootstrapServer.baseUrl}/auth/login`, {
+      username: 'admin',
+      password: bootstrapPassword,
+    })
+    assert.equal(loginResponse.status, 200)
+    const cookie = loginResponse.headers.get('set-cookie')
+    assert.ok(cookie)
+
+    const completeResponse = await postJson(
+      `${bootstrapServer.baseUrl}/auth/bootstrap/complete`,
+      {
+        currentPassword: bootstrapPassword,
+        newUsername: 'steady-admin',
+        newPassword: 'steady-secret-pass-4',
+      },
+      { Cookie: cookie },
+    )
+    assert.equal(completeResponse.status, 200)
+  } finally {
+    await bootstrapServer.stop()
+  }
+
+  const steadyStateServer = await startServerWithoutBootstrap({ codeHome })
+  try {
+    const loginResponse = await postJson(`${steadyStateServer.baseUrl}/auth/login`, {
+      username: 'steady-admin',
+      password: 'steady-secret-pass-4',
+    })
+    assert.equal(loginResponse.status, 200)
+    const body = await loginResponse.json()
+    assert.equal(body.setupRequired, false)
+
+    const staleBootstrapLogin = await postJson(`${steadyStateServer.baseUrl}/auth/login`, {
+      username: 'admin',
+      password: bootstrapPassword,
+    })
+    assert.equal(staleBootstrapLogin.status, 401)
+
+    const anonymousApi = await fetch(`${steadyStateServer.baseUrl}/codex-api/servers`, {
+      headers: { Accept: 'application/json' },
+    })
+    assert.equal(anonymousApi.status, 401)
+  } finally {
+    await steadyStateServer.stop()
+  }
+})

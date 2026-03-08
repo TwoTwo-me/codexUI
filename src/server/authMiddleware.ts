@@ -50,6 +50,13 @@ function isSetupRequiredUser(user: UserProfile | null): boolean {
   return user.mustChangeUsername || user.mustChangePassword || user.bootstrapState === 'pending_setup'
 }
 
+function isAllowedSetupRoute(path: string): boolean {
+  return path === '/setup/bootstrap-admin'
+    || path === '/favicon.ico'
+    || path === '/codex-local-image'
+    || path.startsWith('/assets/')
+}
+
 function isLocalhostRequest(req: Request): boolean {
   const remote = req.socket.remoteAddress ?? ''
   return remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
@@ -759,15 +766,22 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
       return
     }
 
-    if (currentUser && isSetupRequiredUser(currentUser) && path.startsWith('/codex-api/')) {
-      res.status(403).json({
-        error: 'Setup required before using Codex API routes.',
-        setupRequired: true,
-      })
-      return
-    }
-
     if (currentUser) {
+      if (isSetupRequiredUser(currentUser)) {
+        if (path.startsWith('/codex-api/')) {
+          res.status(403).json({
+            error: 'Setup required before using Codex API routes.',
+            setupRequired: true,
+          })
+          return
+        }
+
+        if (!isAllowedSetupRoute(path)) {
+          res.redirect(302, '/setup/bootstrap-admin')
+          return
+        }
+      }
+
       next()
       return
     }
