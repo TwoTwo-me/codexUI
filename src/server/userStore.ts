@@ -38,6 +38,7 @@ function scrypt(password: string, salt: Buffer, keyLength: number, options: {
 
 export type UserRole = 'admin' | 'user'
 export type UserApprovalStatus = 'pending' | 'approved'
+export type BootstrapState = 'none' | 'pending_setup' | 'consumed'
 
 type StoredUser = {
   id: string
@@ -46,6 +47,11 @@ type StoredUser = {
   role: UserRole
   approvalStatus: UserApprovalStatus
   passwordHash: string
+  mustChangeUsername: boolean
+  mustChangePassword: boolean
+  isBootstrapAdmin: boolean
+  bootstrapState: BootstrapState
+  setupCompletedAtIso?: string
   createdAtIso: string
   updatedAtIso: string
   lastLoginAtIso?: string
@@ -63,6 +69,11 @@ export type UserProfile = {
   username: string
   role: UserRole
   approvalStatus: UserApprovalStatus
+  mustChangeUsername: boolean
+  mustChangePassword: boolean
+  isBootstrapAdmin: boolean
+  bootstrapState: BootstrapState
+  setupCompletedAtIso?: string
   createdAtIso: string
   updatedAtIso: string
   lastLoginAtIso?: string
@@ -111,6 +122,10 @@ function normalizeApprovalStatus(value: unknown): UserApprovalStatus {
   return value === 'pending' ? 'pending' : 'approved'
 }
 
+function normalizeBootstrapState(value: unknown): BootstrapState {
+  return value === 'pending_setup' || value === 'consumed' ? value : 'none'
+}
+
 function parseDate(value: unknown, fallbackIso: string): string {
   if (typeof value !== 'string') return fallbackIso
   const trimmed = value.trim()
@@ -139,6 +154,13 @@ function normalizeStoredUser(value: unknown, nowIso: string): StoredUser | null 
   const lastLoginAtIso = typeof record.lastLoginAtIso === 'string' && record.lastLoginAtIso.trim().length > 0
     ? parseDate(record.lastLoginAtIso, updatedAtIso)
     : undefined
+  const mustChangeUsername = record.mustChangeUsername === true
+  const mustChangePassword = record.mustChangePassword === true
+  const isBootstrapAdmin = record.isBootstrapAdmin === true
+  const bootstrapState = normalizeBootstrapState(record.bootstrapState)
+  const setupCompletedAtIso = typeof record.setupCompletedAtIso === 'string' && record.setupCompletedAtIso.trim().length > 0
+    ? parseDate(record.setupCompletedAtIso, updatedAtIso)
+    : undefined
   const approvalStatus = normalizeApprovalStatus(record.approvalStatus)
   const approvedAtIso = typeof record.approvedAtIso === 'string' && record.approvedAtIso.trim().length > 0
     ? parseDate(record.approvedAtIso, updatedAtIso)
@@ -156,6 +178,11 @@ function normalizeStoredUser(value: unknown, nowIso: string): StoredUser | null 
     role: normalizeRole(record.role),
     approvalStatus,
     passwordHash,
+    mustChangeUsername,
+    mustChangePassword,
+    isBootstrapAdmin,
+    bootstrapState,
+    ...(setupCompletedAtIso ? { setupCompletedAtIso } : {}),
     createdAtIso,
     updatedAtIso,
     ...(lastLoginAtIso ? { lastLoginAtIso } : {}),
@@ -196,6 +223,11 @@ function toUserProfile(user: StoredUser): UserProfile {
     username: user.username,
     role: user.role,
     approvalStatus: user.approvalStatus,
+    mustChangeUsername: user.mustChangeUsername,
+    mustChangePassword: user.mustChangePassword,
+    isBootstrapAdmin: user.isBootstrapAdmin,
+    bootstrapState: user.bootstrapState,
+    ...(user.setupCompletedAtIso ? { setupCompletedAtIso: user.setupCompletedAtIso } : {}),
     createdAtIso: user.createdAtIso,
     updatedAtIso: user.updatedAtIso,
     ...(user.lastLoginAtIso ? { lastLoginAtIso: user.lastLoginAtIso } : {}),
@@ -352,6 +384,11 @@ function rowToStoredUser(row: Record<string, unknown>): StoredUser {
     role: normalizeRole(row.role),
     approvalStatus: normalizeApprovalStatus(row.approval_status),
     passwordHash: String(row.password_hash),
+    mustChangeUsername: Number(row.must_change_username) === 1,
+    mustChangePassword: Number(row.must_change_password) === 1,
+    isBootstrapAdmin: Number(row.is_bootstrap_admin) === 1,
+    bootstrapState: normalizeBootstrapState(row.bootstrap_state),
+    ...(typeof row.setup_completed_at_iso === 'string' ? { setupCompletedAtIso: row.setup_completed_at_iso } : {}),
     createdAtIso: String(row.created_at_iso),
     updatedAtIso: String(row.updated_at_iso),
     ...(typeof row.last_login_at_iso === 'string' ? { lastLoginAtIso: row.last_login_at_iso } : {}),
@@ -534,12 +571,17 @@ export async function createUser(input: {
         role,
         approval_status,
         password_hash,
+        must_change_username,
+        must_change_password,
+        is_bootstrap_admin,
+        bootstrap_state,
+        setup_completed_at_iso,
         created_at_iso,
         updated_at_iso,
         last_login_at_iso,
         approved_at_iso,
         approved_by_user_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       randomBytes(16).toString('hex'),
       username,
@@ -547,6 +589,11 @@ export async function createUser(input: {
       role,
       approvalStatus,
       passwordHash,
+      0,
+      0,
+      0,
+      'none',
+      null,
       nowIso,
       nowIso,
       null,
@@ -621,6 +668,11 @@ export async function upsertBootstrapAdmin(
         SET password_hash = ?,
             role = 'admin',
             approval_status = 'approved',
+            must_change_username = 1,
+            must_change_password = 1,
+            is_bootstrap_admin = 1,
+            bootstrap_state = 'pending_setup',
+            setup_completed_at_iso = NULL,
             approved_at_iso = COALESCE(approved_at_iso, ?),
             updated_at_iso = ?
         WHERE id = ?
@@ -636,6 +688,10 @@ export async function upsertBootstrapAdmin(
       role: 'admin',
       approvalStatus: 'approved',
       passwordHash,
+      mustChangeUsername: true,
+      mustChangePassword: true,
+      isBootstrapAdmin: true,
+      bootstrapState: 'pending_setup',
       createdAtIso: nowIso,
       updatedAtIso: nowIso,
       approvedAtIso: nowIso,
@@ -649,12 +705,17 @@ export async function upsertBootstrapAdmin(
         role,
         approval_status,
         password_hash,
+        must_change_username,
+        must_change_password,
+        is_bootstrap_admin,
+        bootstrap_state,
+        setup_completed_at_iso,
         created_at_iso,
         updated_at_iso,
         last_login_at_iso,
         approved_at_iso,
         approved_by_user_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       created.id,
       created.username,
@@ -662,6 +723,11 @@ export async function upsertBootstrapAdmin(
       created.role,
       created.approvalStatus,
       created.passwordHash,
+      1,
+      1,
+      1,
+      'pending_setup',
+      null,
       created.createdAtIso,
       created.updatedAtIso,
       null,

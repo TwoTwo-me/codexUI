@@ -45,6 +45,11 @@ function ensureUsersTable(database: SqliteDatabase): void {
       role TEXT NOT NULL,
       approval_status TEXT NOT NULL DEFAULT 'approved',
       password_hash TEXT NOT NULL,
+      must_change_username INTEGER NOT NULL DEFAULT 0,
+      must_change_password INTEGER NOT NULL DEFAULT 0,
+      is_bootstrap_admin INTEGER NOT NULL DEFAULT 0,
+      bootstrap_state TEXT NOT NULL DEFAULT 'none',
+      setup_completed_at_iso TEXT,
       created_at_iso TEXT NOT NULL,
       updated_at_iso TEXT NOT NULL,
       last_login_at_iso TEXT,
@@ -69,6 +74,21 @@ function ensureUsersTable(database: SqliteDatabase): void {
   }
   if (!columnNames.has('last_login_at_iso')) {
     database.exec('ALTER TABLE users ADD COLUMN last_login_at_iso TEXT')
+  }
+  if (!columnNames.has('must_change_username')) {
+    database.exec("ALTER TABLE users ADD COLUMN must_change_username INTEGER NOT NULL DEFAULT 0")
+  }
+  if (!columnNames.has('must_change_password')) {
+    database.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+  }
+  if (!columnNames.has('is_bootstrap_admin')) {
+    database.exec("ALTER TABLE users ADD COLUMN is_bootstrap_admin INTEGER NOT NULL DEFAULT 0")
+  }
+  if (!columnNames.has('bootstrap_state')) {
+    database.exec("ALTER TABLE users ADD COLUMN bootstrap_state TEXT NOT NULL DEFAULT 'none'")
+  }
+  if (!columnNames.has('setup_completed_at_iso')) {
+    database.exec('ALTER TABLE users ADD COLUMN setup_completed_at_iso TEXT')
   }
 }
 

@@ -44,6 +44,11 @@ type RateLimitRecord = {
   blockedUntilMs: number
 }
 
+function isSetupRequiredUser(user: UserProfile | null): boolean {
+  if (!user) return false
+  return user.mustChangeUsername || user.mustChangePassword || user.bootstrapState === 'pending_setup'
+}
+
 function isLocalhostRequest(req: Request): boolean {
   const remote = req.socket.remoteAddress ?? ''
   return remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1'
@@ -222,6 +227,21 @@ function isPublicRelayAgentPath(path: string, method: string): boolean {
     return true
   }
   return false
+}
+
+function buildSessionPayload(user: UserProfile | null): Record<string, unknown> {
+  if (!user) {
+    return { authenticated: false }
+  }
+
+  return {
+    authenticated: true,
+    user,
+    setupRequired: isSetupRequiredUser(user),
+    mustChangeUsername: user.mustChangeUsername,
+    mustChangePassword: user.mustChangePassword,
+    bootstrapState: user.bootstrapState,
+  }
 }
 
 async function readJsonBody(req: Request): Promise<Record<string, unknown> | null> {
@@ -646,19 +666,14 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
     const token = createSession(signedInUser!.id)
     res.setHeader('Set-Cookie', buildSessionCookie(req, token))
     setRequestAuthenticatedUser(req, signedInUser)
-    res.json({ ok: true, user: signedInUser })
+    res.json({
+      ok: true,
+      ...buildSessionPayload(signedInUser),
+    })
   }
 
   async function handleSession(_req: Request, res: Response, currentUser: UserProfile | null): Promise<void> {
-    if (!currentUser) {
-      res.status(200).json({ authenticated: false })
-      return
-    }
-
-    res.status(200).json({
-      authenticated: true,
-      user: currentUser,
-    })
+    res.status(200).json(buildSessionPayload(currentUser))
   }
 
   async function handleLogout(req: Request, res: Response): Promise<void> {
@@ -702,6 +717,14 @@ export function createAuthMiddleware(passwordOrOptions: string | AuthMiddlewareO
 
     if (path.startsWith('/auth/')) {
       res.status(405).json({ error: 'Method not allowed' })
+      return
+    }
+
+    if (currentUser && isSetupRequiredUser(currentUser) && path.startsWith('/codex-api/')) {
+      res.status(403).json({
+        error: 'Setup required before using Codex API routes.',
+        setupRequired: true,
+      })
       return
     }
 
