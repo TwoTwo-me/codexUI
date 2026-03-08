@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Command } from 'commander'
@@ -355,6 +355,60 @@ export async function writeConnectorTokenFile(path: string, token: string): Prom
   }
   await mkdir(dirname(normalizedPath), { recursive: true, mode: 0o700 })
   await writeFile(normalizedPath, token.trim(), { encoding: 'utf8', mode: 0o600 })
+}
+
+function getConnectorHelperScriptPath(connectorId: string, kind: 'start' | 'systemd' | 'pm2'): string {
+  return join(process.cwd(), `codexui-connector-${connectorId}-${kind}.sh`)
+}
+
+async function writeExecutableScript(path: string, body: string): Promise<void> {
+  await writeFile(path, body, { encoding: 'utf8', mode: 0o700 })
+  await chmod(path, 0o700)
+}
+
+async function writeConnectorHelperScripts(input: {
+  connectorId: string
+  connectCommand: string
+  systemdRegistrationCommand: string
+  pm2RegistrationCommand: string
+}): Promise<{
+  directory: string
+  startScriptPath: string
+  systemdScriptPath: string
+  pm2ScriptPath: string
+}> {
+  const startScriptPath = getConnectorHelperScriptPath(input.connectorId, 'start')
+  const systemdScriptPath = getConnectorHelperScriptPath(input.connectorId, 'systemd')
+  const pm2ScriptPath = getConnectorHelperScriptPath(input.connectorId, 'pm2')
+
+  await writeExecutableScript(startScriptPath, [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    '',
+    `exec ${input.connectCommand}`,
+    '',
+  ].join('\n'))
+  await writeExecutableScript(systemdScriptPath, [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    '',
+    input.systemdRegistrationCommand,
+    '',
+  ].join('\n'))
+  await writeExecutableScript(pm2ScriptPath, [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    '',
+    input.pm2RegistrationCommand,
+    '',
+  ].join('\n'))
+
+  return {
+    directory: process.cwd(),
+    startScriptPath,
+    systemdScriptPath,
+    pm2ScriptPath,
+  }
 }
 
 export async function exchangeConnectorBootstrap(input: {
@@ -774,12 +828,19 @@ async function runCli(argv: string[]): Promise<void> {
           ...(installed.connector.relayE2eeKeyId ? { relayE2eeKeyId: installed.connector.relayE2eeKeyId } : {}),
           allowInsecureHttp: options.allowInsecureHttp === true,
         })
+        const helperScripts = await writeConnectorHelperScripts({
+          connectorId: options.connector,
+          connectCommand,
+          systemdRegistrationCommand,
+          pm2RegistrationCommand,
+        })
         console.log('\nStart or restart the connector with:')
         console.log(connectCommand)
-        console.log('\nRegister a user systemd service with:')
-        console.log(systemdRegistrationCommand)
-        console.log('\nRegister with PM2:')
-        console.log(pm2RegistrationCommand)
+        console.log('\nCreated helper scripts in:')
+        console.log(helperScripts.directory)
+        console.log(`- start: ${helperScripts.startScriptPath}`)
+        console.log(`- systemd: ${helperScripts.systemdScriptPath}`)
+        console.log(`- pm2: ${helperScripts.pm2ScriptPath}`)
       } else {
         console.log('\nNo token file was written because the connector is running immediately in this process.')
       }

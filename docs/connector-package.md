@@ -66,6 +66,10 @@ During `install` the Connector:
 2. calls `POST /codex-api/connectors/:id/bootstrap-exchange`
 3. receives the durable runtime credential
 4. rewrites the same `--token-file` with the durable credential
+5. writes helper scripts into the **current directory**:
+   - `codexui-connector-<id>-start.sh`
+   - `codexui-connector-<id>-systemd.sh`
+   - `codexui-connector-<id>-pm2.sh`
 
 ### 2. Start the Connector runtime
 
@@ -75,6 +79,8 @@ npm exec --yes --package=github:TwoTwo-me/codexUI#main -- codexui-connector conn
   --connector edge-laptop \
   --token-file $HOME/.codexui-connector/edge-laptop.token
 ```
+
+`install` still prints the direct `connect` command inline, but the systemd / PM2 registration steps are now also written into the helper shell scripts above so operators can simply run those files from the directory where they performed the install.
 
 ## Useful flags
 

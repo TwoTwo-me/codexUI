@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdtemp, readFile, symlink } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -184,6 +184,8 @@ test('connector install CLI accepts inline bootstrap token when a token file is 
   const connectorEntrypoint = resolve(repoDir, 'dist-cli/connector.js')
   const tempDir = await mkdtemp(resolve(tmpdir(), 'codexui-inline-install-'))
   const tokenFilePath = resolve(tempDir, 'edge-laptop.token')
+  const installCwd = resolve(tempDir, 'install-artifacts')
+  await mkdir(installCwd, { recursive: true })
   let port = 0
 
   const server = createServer(async (req, res) => {
@@ -232,7 +234,7 @@ test('connector install CLI accepts inline bootstrap token when a token file is 
           '--allow-insecure-http',
         ],
         {
-          cwd: repoDir,
+          cwd: installCwd,
           env: {
             ...process.env,
             NO_COLOR: '1',
@@ -260,11 +262,19 @@ test('connector install CLI accepts inline bootstrap token when a token file is 
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
     assert.match(`${result.stdout}\n${result.stderr}`, /Credential file updated:/)
     assert.match(result.stdout, /Start or restart the connector with:/)
-    assert.match(result.stdout, /Register a user systemd service with:/)
-    assert.match(result.stdout, /systemctl --user enable --now codexui-connector-edge-laptop\.service/)
-    assert.match(result.stdout, /Register with PM2:/)
-    assert.match(result.stdout, /pm2 start "\$HOME\/\.config\/codexui-connector\/edge-laptop\.sh" --name "codexui-connector-edge-laptop"/)
+    assert.match(result.stdout, /Created helper scripts in:/)
+    assert.match(result.stdout, /codexui-connector-edge-laptop-start\.sh/)
+    assert.match(result.stdout, /codexui-connector-edge-laptop-systemd\.sh/)
+    assert.match(result.stdout, /codexui-connector-edge-laptop-pm2\.sh/)
     assert.equal(await readFile(tokenFilePath, 'utf8'), 'durable-token-inline-456')
+
+    const startScript = await readFile(resolve(installCwd, 'codexui-connector-edge-laptop-start.sh'), 'utf8')
+    const systemdScript = await readFile(resolve(installCwd, 'codexui-connector-edge-laptop-systemd.sh'), 'utf8')
+    const pm2Script = await readFile(resolve(installCwd, 'codexui-connector-edge-laptop-pm2.sh'), 'utf8')
+    assert.match(startScript, /codexui-connector connect/)
+    assert.match(startScript, /--token-file/)
+    assert.match(systemdScript, /systemctl --user enable --now codexui-connector-edge-laptop\.service/)
+    assert.match(pm2Script, /pm2 start "\$HOME\/\.config\/codexui-connector\/edge-laptop\.sh" --name "codexui-connector-edge-laptop"/)
   } finally {
     await new Promise((resolve, reject) => {
       server.close((error) => {

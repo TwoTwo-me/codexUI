@@ -36,6 +36,18 @@ npm exec --yes --package=github:TwoTwo-me/codexUI#main -- codexui-connector inst
   --token-file $HOME/.codexui-connector/edge-laptop.token
 ```
 
+설치가 끝나면 현재 디렉토리에 아래 helper script 3개가 생성됩니다.
+
+```text
+./codexui-connector-edge-laptop-start.sh
+./codexui-connector-edge-laptop-systemd.sh
+./codexui-connector-edge-laptop-pm2.sh
+```
+
+- `start.sh` — 즉시 실행 / 재시작용
+- `systemd.sh` — user systemd 등록용
+- `pm2.sh` — PM2 등록용
+
 ### 2. 원격 호스트 요구사항
 
 - Node.js 18+
