@@ -39,8 +39,6 @@ CODEXUI_ADMIN_USERNAME=admin
 CODEXUI_ADMIN_PASSWORD_HASH=
 CODEXUI_ADMIN_PASSWORD_HASH_FILE=
 CODEXUI_ADMIN_LOGIN_PASSWORD=
-CODEXUI_ADMIN_PASSWORD=change-me-now
-CODEXUI_ADMIN_PASSWORD_FILE=
 CODEXUI_DATA_DIR=./.data/hub
 CODEXUI_WORKSPACE_DIR=./workspace
 CODEXUI_CODEX_HOME_DIR=./docker/local-codex
@@ -54,7 +52,7 @@ CODEXUI_CODEX_CLI_VERSION=0.110.0
 
 At minimum:
 
-- `CODEXUI_ADMIN_PASSWORD_HASH` (recommended) or `CODEXUI_ADMIN_PASSWORD`
+- `CODEXUI_ADMIN_PASSWORD_HASH` (recommended)
 - `CODEXUI_PUBLIC_URL`
 
 Commonly adjusted:
@@ -82,24 +80,38 @@ The helper prints:
 CODEXUI_ADMIN_PASSWORD_HASH=scrypt$$...
 ```
 
-Paste that into `.env`, then remove or blank `CODEXUI_ADMIN_PASSWORD`.
+Paste that into `.env`.
 
 The helper already escapes `$` as `$$`, so the output is safe to paste directly into `docker compose`-managed `.env` files.
 
-### Credential precedence
+### Credential sources
 
 The Hub entrypoint resolves bootstrap credentials in this order:
 
 1. `CODEXUI_ADMIN_PASSWORD_HASH_FILE`
 2. `CODEXUI_ADMIN_PASSWORD_HASH`
-3. `CODEXUI_ADMIN_PASSWORD_FILE`
-4. `CODEXUI_ADMIN_PASSWORD`
+3. no bootstrap credential
 
-If hash-based and plaintext-based values are mixed, the container exits with an error instead of guessing.
+Plaintext bootstrap env/file inputs are rejected.
+
+### First-login setup wizard
+
+On the first successful bootstrap admin login:
+
+1. the Hub issues a valid session
+2. the session is marked `setupRequired`
+3. the browser is forced to `/setup/bootstrap-admin`
+4. the administrator must change both username and password before the rest of the app unlocks
+
+Until that setup is complete:
+
+- `codex-api` routes are blocked
+- browser navigation is redirected back to `/setup/bootstrap-admin`
+- helper scripts that need authenticated API access will fail with an instruction to complete setup first
 
 ### Runtime-only plaintext for helper scripts
 
-When the Hub is configured from `CODEXUI_ADMIN_PASSWORD_HASH`, the smoke test and the Hub-local registration helper still need the real password to log in once.
+When the Hub is configured from `CODEXUI_ADMIN_PASSWORD_HASH`, the smoke test and the Hub-local registration helper still need the real password to log in.
 
 Provide it **only at runtime**:
 
@@ -114,6 +126,18 @@ or:
 export CODEXUI_ADMIN_LOGIN_PASSWORD='your-bootstrap-password'
 npm run docker:hub:register-local -- --default local-hub "Hub Local"
 ```
+
+On a fresh installation, `docker:hub:smoke` will report that bootstrap login worked even if the setup wizard is still pending. `docker:hub:register-local` is stricter: it refuses to continue until `/setup/bootstrap-admin` has been completed, because the Hub blocks `codex-api` access until then.
+
+### Steady-state restart without bootstrap hash
+
+After the setup wizard completes successfully:
+
+1. remove or blank `CODEXUI_ADMIN_PASSWORD_HASH` / `CODEXUI_ADMIN_PASSWORD_HASH_FILE`
+2. keep the rotated admin credentials in your password manager
+3. restart the Hub normally
+
+The Hub will continue authenticating against SQLite (`$CODEX_HOME/codexui/hub.sqlite`) and will not recreate the bootstrap admin.
 
 ## Start / stop / inspect
 
@@ -139,7 +163,7 @@ The smoke script verifies:
 
 - the Hub becomes reachable
 - `/auth/session` responds
-- the bootstrap admin can log in successfully
+- the supplied admin password can log in successfully
 - a session cookie is issued
 
 ### Logs

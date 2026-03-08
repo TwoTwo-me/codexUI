@@ -38,10 +38,10 @@ fi
 
 SERVER_ID="${POSITIONAL[0]}"
 SERVER_NAME="${POSITIONAL[1]:-$SERVER_ID}"
-ADMIN_LOGIN_PASSWORD="${CODEXUI_ADMIN_LOGIN_PASSWORD:-${CODEXUI_ADMIN_PASSWORD:-}}"
+ADMIN_LOGIN_PASSWORD="${CODEXUI_ADMIN_LOGIN_PASSWORD:-}"
 
 if [[ -z "$ADMIN_LOGIN_PASSWORD" ]]; then
-  echo "Set CODEXUI_ADMIN_LOGIN_PASSWORD (or CODEXUI_ADMIN_PASSWORD) before registering a Hub-local server." >&2
+  echo "Set CODEXUI_ADMIN_LOGIN_PASSWORD before registering a Hub-local server." >&2
   exit 1
 fi
 
@@ -73,6 +73,12 @@ const loginResponse = await fetch(`${baseUrl}/auth/login`, {
 if (!loginResponse.ok) {
   console.error(`Failed to log into hub as ${username}: ${loginResponse.status}`)
   console.error(await loginResponse.text())
+  process.exit(1)
+}
+
+const loginPayload = await loginResponse.json()
+if (loginPayload?.setupRequired === true) {
+  console.error('Bootstrap admin setup is still required. Complete /setup/bootstrap-admin in the web UI first, then rerun this helper with the rotated admin password.')
   process.exit(1)
 }
 

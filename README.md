@@ -77,11 +77,13 @@ CODEXUI_ADMIN_PASSWORD_HASH=scrypt$$...
 At minimum, set:
 
 ```dotenv
-CODEXUI_ADMIN_PASSWORD_HASH=scrypt$...
+CODEXUI_ADMIN_PASSWORD_HASH=scrypt$$...
 CODEXUI_PUBLIC_URL=http://localhost:4300
 ```
 
-If you use the smoke test or the `docker:hub:register-local` helper while the Hub is configured from a hash, provide the plaintext **at runtime only**:
+Plaintext bootstrap secrets are no longer supported.
+
+If you use the smoke test or the `docker:hub:register-local` helper, provide the current admin password **at runtime only**:
 
 ```bash
 export CODEXUI_ADMIN_LOGIN_PASSWORD='your-bootstrap-password'
@@ -116,27 +118,42 @@ docker compose up --build -d hub
 npm run docker:hub:smoke
 ```
 
-### 5. Open the UI
+### 5. First login: complete the setup wizard
+
+- Open `http://localhost:4300`
+- Sign in as the bootstrap admin (`admin` by default) with the plaintext password you used to generate the hash
+- You will be forced to `/setup/bootstrap-admin`
+- Change the admin username and password before using the rest of the Hub
+
+### 6. Remove the bootstrap hash for steady-state restarts
+
+After the setup wizard succeeds, remove the bootstrap hash from `.env`:
+
+```dotenv
+CODEXUI_ADMIN_PASSWORD_HASH=
+CODEXUI_ADMIN_PASSWORD_HASH_FILE=
+```
+
+The Hub can now restart with the rotated SQLite-backed admin account and no bootstrap secret in `.env`.
+
+### 7. Open the UI normally
 
 - URL: `http://localhost:4300` or your configured public URL
-- Username: `admin` by default
-- Password: the plaintext password used to generate `CODEXUI_ADMIN_PASSWORD_HASH`
+- Username / Password: the rotated admin credentials you set in the setup wizard
 
-## Bootstrap admin credential precedence
+## Bootstrap admin credential sources
 
-The Hub resolves bootstrap admin credentials in this order:
+If a bootstrap credential is present, the Hub resolves it in this order:
 
 1. `CODEXUI_ADMIN_PASSWORD_HASH_FILE`
 2. `CODEXUI_ADMIN_PASSWORD_HASH`
-3. `CODEXUI_ADMIN_PASSWORD_FILE`
-4. `CODEXUI_ADMIN_PASSWORD`
+3. no bootstrap credential
 
 Rules:
 
-- hash inputs and plaintext inputs **cannot be combined**
+- plaintext bootstrap env/file/CLI inputs are rejected
 - hash-file and hash-env cannot both be set
-- plaintext-file and plaintext-env cannot both be set
-- plaintext is still supported for backwards compatibility, but hash-based bootstrap is recommended
+- after first-login setup completes, you should remove the bootstrap hash and restart normally
 
 ## Docker layout
 
@@ -199,6 +216,7 @@ npm run docker:hub:prepare-auth
 2. Register a local server from inside the container:
 
 ```bash
+export CODEXUI_ADMIN_LOGIN_PASSWORD='your-current-admin-password'
 npm run docker:hub:register-local -- --default local-hub "Hub Local"
 ```
 
@@ -212,13 +230,19 @@ npm run build
 node dist-cli/index.js --host 0.0.0.0 --port 4300 --password-hash 'scrypt$...'
 ```
 
+After first-login setup is complete and the admin account is stored in SQLite, later restarts can omit the bootstrap hash entirely:
+
+```bash
+node dist-cli/index.js --host 0.0.0.0 --port 4300
+```
+
 Useful environment variables:
 
 - `CODEXUI_BIND_HOST`
 - `CODEXUI_PORT`
 - `CODEXUI_ADMIN_USERNAME`
 - `CODEXUI_ADMIN_PASSWORD_HASH`
-- `CODEXUI_ADMIN_PASSWORD`
+- `CODEXUI_ADMIN_PASSWORD_HASH_FILE`
 - `CODEXUI_OPEN_BROWSER=false`
 - `CODEX_HOME`
 
@@ -228,10 +252,10 @@ Useful environment variables:
 - [`docs/settings-and-connectors.md`](docs/settings-and-connectors.md) — Settings UI and Connector lifecycle
 - [`docs/connector-package.md`](docs/connector-package.md) — remote Connector install/runtime guide
 - [`docs/connector-service-management.md`](docs/connector-service-management.md) — systemd / PM2 운영 가이드
+- [`docs/bootstrap-admin-setup-report.md`](docs/bootstrap-admin-setup-report.md) — hash-only bootstrap and forced first-login rotation report
 - [`docs/explorer-hooks-sqlite-approval-report.md`](docs/explorer-hooks-sqlite-approval-report.md) — server-scoped explorer, hook inbox, SQLite auth, and approval flow report
 - [`docs/implementation-report.md`](docs/implementation-report.md) — phase-by-phase implementation summary
-- [`docs/explorer-hooks-sqlite-approval-report.md`](docs/explorer-hooks-sqlite-approval-report.md) — explorer/hook/sqlite/approval rollout evidence
-- [`docs/connector-bootstrap-hardening-report.md`](docs/connector-bootstrap-hardening-report.md) — bootstrap hardening details
+- [`docs/connector-bootstrap-hardening-report.md`](docs/connector-bootstrap-hardening-report.md) — connector bootstrap hardening details
 - [`docs/multi-server-test-workflow.md`](docs/multi-server-test-workflow.md) — disposable multi-server Docker lab stack
 
 ## Operational notes
@@ -241,6 +265,7 @@ Useful environment variables:
 - Public deployments should use **HTTPS** in front of the Hub.
 - Connector bootstrap tokens are single-use and short-lived.
 - The durable Connector credential is distinct from the bootstrap token.
+- Bootstrap admin setup is also single-use: once completed, the Hub no longer needs a bootstrap hash to restart.
 
 ## Verification
 
