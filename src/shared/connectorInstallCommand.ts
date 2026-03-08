@@ -16,6 +16,14 @@ function getTokenFilePath(connectorId: string, tokenFilePath?: string): string {
   return tokenFilePath?.trim() || `$HOME/.codexui-connector/${connectorId}.token`
 }
 
+function getRunnerScriptPath(connectorId: string): string {
+  return `$HOME/.config/codexui-connector/${connectorId}.sh`
+}
+
+function getSystemdUnitName(connectorId: string): string {
+  return `codexui-connector-${connectorId}.service`
+}
+
 function createConnectorExecPrefix(): string[] {
   return [
     'npm',
@@ -39,6 +47,62 @@ export function createConnectorConnectCommand(input: Omit<ConnectorCommandInput,
     command: 'connect',
     ...input,
   })
+}
+
+export function createConnectorSystemdUserRegistrationCommand(
+  input: Omit<ConnectorCommandInput, 'command' | 'bootstrapToken'>,
+): string {
+  const runnerScriptPath = getRunnerScriptPath(input.connectorId)
+  const unitName = getSystemdUnitName(input.connectorId)
+  const connectCommand = createConnectorConnectCommand(input)
+
+  return [
+    'mkdir -p "$HOME/.config/codexui-connector" "$HOME/.config/systemd/user"',
+    `cat > ${JSON.stringify(runnerScriptPath)} <<'EOF'`,
+    '#!/usr/bin/env bash',
+    `exec ${connectCommand}`,
+    'EOF',
+    `chmod 700 ${JSON.stringify(runnerScriptPath)}`,
+    `cat > "$HOME/.config/systemd/user/${unitName}" <<'EOF'`,
+    '[Unit]',
+    `Description=CodexUI Connector (${input.connectorId})`,
+    'After=network-online.target',
+    'Wants=network-online.target',
+    '',
+    '[Service]',
+    'Type=simple',
+    `ExecStart=%h/.config/codexui-connector/${input.connectorId}.sh`,
+    'Restart=always',
+    'RestartSec=5',
+    '',
+    '[Install]',
+    'WantedBy=default.target',
+    'EOF',
+    'systemctl --user daemon-reload',
+    `systemctl --user enable --now ${unitName}`,
+    'loginctl enable-linger "$USER"',
+  ].join('\n')
+}
+
+export function createConnectorPm2RegistrationCommand(
+  input: Omit<ConnectorCommandInput, 'command' | 'bootstrapToken'>,
+): string {
+  const runnerScriptPath = getRunnerScriptPath(input.connectorId)
+  const pm2Name = `codexui-connector-${input.connectorId}`
+  const connectCommand = createConnectorConnectCommand(input)
+
+  return [
+    'mkdir -p "$HOME/.config/codexui-connector"',
+    `cat > ${JSON.stringify(runnerScriptPath)} <<'EOF'`,
+    '#!/usr/bin/env bash',
+    `exec ${connectCommand}`,
+    'EOF',
+    `chmod 700 ${JSON.stringify(runnerScriptPath)}`,
+    'npm install -g pm2',
+    `pm2 start ${JSON.stringify(runnerScriptPath)} --name ${JSON.stringify(pm2Name)}`,
+    'pm2 save',
+    'pm2 startup',
+  ].join('\n')
 }
 
 export function createConnectorCommand(input: ConnectorCommandInput): string {

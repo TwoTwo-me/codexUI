@@ -8,6 +8,8 @@ import { spawnSync } from 'node:child_process'
 import {
   createConnectorConnectCommand,
   createConnectorInstallCommand,
+  createConnectorPm2RegistrationCommand,
+  createConnectorSystemdUserRegistrationCommand,
 } from '../shared/connectorInstallCommand.js'
 import { CodexUiConnectorAppServer } from './codexUiConnectorAppServer.js'
 import { LocalCodexAppServer } from './localCodexAppServer.js'
@@ -755,10 +757,29 @@ async function runCli(argv: string[]): Promise<void> {
           hubAddress: options.hub,
           connectorId: options.connector,
           tokenFilePath: options.tokenFile?.trim() || `$HOME/.codexui-connector/${options.connector}.token`,
+          ...(installed.connector.relayE2eeKeyId ? { relayE2eeKeyId: installed.connector.relayE2eeKeyId } : {}),
+          allowInsecureHttp: options.allowInsecureHttp === true,
+        })
+        const systemdRegistrationCommand = createConnectorSystemdUserRegistrationCommand({
+          hubAddress: options.hub,
+          connectorId: options.connector,
+          tokenFilePath: options.tokenFile?.trim() || `$HOME/.codexui-connector/${options.connector}.token`,
+          ...(installed.connector.relayE2eeKeyId ? { relayE2eeKeyId: installed.connector.relayE2eeKeyId } : {}),
+          allowInsecureHttp: options.allowInsecureHttp === true,
+        })
+        const pm2RegistrationCommand = createConnectorPm2RegistrationCommand({
+          hubAddress: options.hub,
+          connectorId: options.connector,
+          tokenFilePath: options.tokenFile?.trim() || `$HOME/.codexui-connector/${options.connector}.token`,
+          ...(installed.connector.relayE2eeKeyId ? { relayE2eeKeyId: installed.connector.relayE2eeKeyId } : {}),
           allowInsecureHttp: options.allowInsecureHttp === true,
         })
         console.log('\nStart or restart the connector with:')
         console.log(connectCommand)
+        console.log('\nRegister a user systemd service with:')
+        console.log(systemdRegistrationCommand)
+        console.log('\nRegister with PM2:')
+        console.log(pm2RegistrationCommand)
       } else {
         console.log('\nNo token file was written because the connector is running immediately in this process.')
       }
