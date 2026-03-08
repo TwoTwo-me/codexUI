@@ -9,6 +9,7 @@ import {
   createConnectorConnectCommand,
   createConnectorInstallCommand,
 } from '../shared/connectorInstallCommand.js'
+import { CodexUiConnectorAppServer } from './codexUiConnectorAppServer.js'
 import { LocalCodexAppServer } from './localCodexAppServer.js'
 import {
   CodexRelayConnector,
@@ -511,7 +512,7 @@ async function runConnectorLoop(input: {
 
   const codexCommand = resolveCodexCommand()
   const logger = createLogger(input.verbose)
-  const appServer: RelayConnectorAppServer = new LocalCodexAppServer(codexCommand)
+  const appServer: RelayConnectorAppServer = new CodexUiConnectorAppServer(new LocalCodexAppServer(codexCommand))
   const normalizedHubAddress = normalizeHubAddress(input.hubAddress, {
     allowInsecureHttp: input.allowInsecureHttp === true,
   })

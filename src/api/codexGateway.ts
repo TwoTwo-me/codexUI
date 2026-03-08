@@ -518,7 +518,7 @@ export async function openProjectRoot(path: string, options?: { createIfMissing?
 
 export async function getProjectRootSuggestion(basePath: string): Promise<{ name: string; path: string }> {
   const query = new URLSearchParams({ basePath })
-  const response = await fetch(`/codex-api/project-root-suggestion?${query.toString()}`)
+  const response = await fetch(buildServerScopedPath(`/codex-api/project-root-suggestion?${query.toString()}`))
   const payload = (await response.json()) as unknown
   if (!response.ok) {
     const message = getErrorMessageFromPayload(payload, 'Failed to suggest project name')
@@ -584,7 +584,8 @@ export async function getFsDirectoryList(path?: string): Promise<FsDirectoryList
   }
 
   const requestUrl = query.size > 0 ? `/codex-api/fs/list?${query.toString()}` : '/codex-api/fs/list'
-  const response = await fetch(requestUrl)
+  const scopedRequestUrl = buildServerScopedPath(requestUrl)
+  const response = await fetch(scopedRequestUrl)
   const payload = (await response.json()) as unknown
   if (!response.ok) {
     const message = getErrorMessageFromPayload(payload, 'Failed to list folders')
@@ -620,7 +621,7 @@ export async function searchComposerFiles(cwd: string, query = '', limit = 20): 
   const normalizedCwd = cwd.trim()
   if (!normalizedCwd) return []
 
-  const response = await fetch('/codex-api/composer-file-search', {
+  const response = await fetch(buildServerScopedPath('/codex-api/composer-file-search'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

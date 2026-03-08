@@ -483,6 +483,9 @@ function onToggleAutoRefreshTimer(): void {
 }
 
 function onSelectServer(serverId: string): void {
+  if (isHomeRoute.value) {
+    newThreadCwd.value = '~'
+  }
   void selectServer(serverId)
 }
 

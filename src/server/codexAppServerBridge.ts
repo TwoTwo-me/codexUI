@@ -23,6 +23,12 @@ import {
   RELAY_E2EE_RPC_METHOD,
   normalizeRelayE2eeEnvelope,
 } from '../types/relayE2ee.js'
+import {
+  executeServerFsBridgeMethod,
+  SERVER_COMPOSER_FILE_SEARCH_METHOD,
+  SERVER_FS_LIST_METHOD,
+  SERVER_PROJECT_ROOT_SUGGESTION_METHOD,
+} from '../shared/serverFsBridge.js'
 import { normalizeHubAddress } from '../utils/hubAddress.js'
 
 type JsonRpcCall = {
@@ -174,46 +180,6 @@ function setJson(res: ServerResponse, statusCode: number, payload: unknown): voi
   res.statusCode = statusCode
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   res.end(JSON.stringify(payload))
-}
-
-function scoreFileCandidate(path: string, query: string): number {
-  if (!query) return 0
-  const lowerPath = path.toLowerCase()
-  const lowerQuery = query.toLowerCase()
-  const baseName = lowerPath.slice(lowerPath.lastIndexOf('/') + 1)
-  if (baseName === lowerQuery) return 0
-  if (baseName.startsWith(lowerQuery)) return 1
-  if (baseName.includes(lowerQuery)) return 2
-  if (lowerPath.includes(`/${lowerQuery}`)) return 3
-  if (lowerPath.includes(lowerQuery)) return 4
-  return 10
-}
-
-async function listFilesWithRipgrep(cwd: string): Promise<string[]> {
-  return await new Promise<string[]>((resolve, reject) => {
-    const proc = spawn('rg', ['--files', '--hidden', '-g', '!.git', '-g', '!node_modules'], {
-      cwd,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stdout = ''
-    let stderr = ''
-    proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-    proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
-    proc.on('error', reject)
-    proc.on('close', (code) => {
-      if (code === 0) {
-        const rows = stdout
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean)
-        resolve(rows)
-        return
-      }
-      const details = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n')
-      reject(new Error(details || 'rg --files failed'))
-    })
-  })
 }
 
 function getCodexHomeDir(): string {
@@ -2511,6 +2477,39 @@ function mapRelayHubErrorToBridgeError(error: RelayHubError): BridgeHttpError {
   return new BridgeHttpError(error.statusCode, error.message)
 }
 
+async function dispatchServerScopedBridgeMethod(
+  resolved: ResolvedServerRuntime,
+  method: string,
+  params: unknown,
+  relayHub: OutboundRelayHub,
+): Promise<unknown> {
+  if (resolved.server.transport === 'relay') {
+    const relayConfig = resolved.server.relay
+    if (!relayConfig) {
+      throw new BridgeHttpError(503, `Relay server "${resolved.server.id}" is missing relay configuration`)
+    }
+    try {
+      return await relayHub.dispatchRpc(
+        {
+          scopeKey: resolved.scope.cacheKey,
+          serverId: resolved.server.id,
+          agentId: relayConfig.agentId,
+        },
+        method,
+        params,
+        relayConfig.requestTimeoutMs,
+      )
+    } catch (error) {
+      if (error instanceof RelayHubError) {
+        throw mapRelayHubErrorToBridgeError(error)
+      }
+      throw error
+    }
+  }
+
+  return await executeServerFsBridgeMethod(method, params)
+}
+
 type SharedBridgeState = {
   runtimeRegistry: AppServerRuntimeRegistry
   relayHub: OutboundRelayHub
@@ -3520,117 +3519,95 @@ export function createCodexBridgeMiddleware(): CodexBridgeMiddleware {
       }
 
       if (req.method === 'GET' && url.pathname === '/codex-api/fs/list') {
-        const homePath = homedir()
-        const rawPath = url.searchParams.get('path')?.trim() ?? ''
-        const currentPath = rawPath.length > 0 ? (isAbsolute(rawPath) ? rawPath : resolve(rawPath)) : homePath
-
         try {
-          const info = await stat(currentPath)
-          if (!info.isDirectory()) {
-            setJson(res, 400, { error: 'Path exists but is not a directory' })
-            return
-          }
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException | undefined)?.code
-          if (code === 'ENOENT') {
-            setJson(res, 404, { error: 'Directory does not exist' })
-            return
-          }
-          setJson(res, 500, { error: 'Failed to access directory' })
-          return
-        }
-
-        try {
-          const parentCandidate = dirname(currentPath)
-          const entries = (await readdir(currentPath, { withFileTypes: true }))
-            .filter((entry) => entry.isDirectory())
-            .map((entry) => ({ name: entry.name, path: join(currentPath, entry.name) }))
-            .sort((a, b) => a.name.localeCompare(b.name))
-
-          setJson(res, 200, {
-            data: {
-              currentPath,
-              homePath,
-              parentPath: parentCandidate === currentPath ? null : parentCandidate,
-              entries,
+          const resolved = await resolveServerRuntime(req, url, runtimeRegistry)
+          const data = await dispatchServerScopedBridgeMethod(
+            resolved,
+            SERVER_FS_LIST_METHOD,
+            {
+              path: url.searchParams.get('path')?.trim() ?? '',
             },
-          })
+            relayHub,
+          )
+          setJson(res, 200, { data })
           return
-        } catch {
-          setJson(res, 500, { error: 'Failed to read directory' })
+        } catch (error) {
+          if (error instanceof BridgeHttpError) {
+            setJson(res, error.statusCode, { error: error.message })
+            return
+          }
+          const message = error instanceof Error ? error.message : 'Failed to list folders'
+          const statusCode = message === 'Directory does not exist'
+            ? 404
+            : message === 'Path exists but is not a directory'
+              ? 400
+              : 500
+          setJson(res, statusCode, { error: message })
           return
         }
       }
 
       if (req.method === 'GET' && url.pathname === '/codex-api/project-root-suggestion') {
-        const basePath = url.searchParams.get('basePath')?.trim() ?? ''
-        if (!basePath) {
-          setJson(res, 400, { error: 'Missing basePath' })
-          return
-        }
-        const normalizedBasePath = isAbsolute(basePath) ? basePath : resolve(basePath)
         try {
-          const baseInfo = await stat(normalizedBasePath)
-          if (!baseInfo.isDirectory()) {
-            setJson(res, 400, { error: 'basePath is not a directory' })
+          const resolved = await resolveServerRuntime(req, url, runtimeRegistry)
+          const data = await dispatchServerScopedBridgeMethod(
+            resolved,
+            SERVER_PROJECT_ROOT_SUGGESTION_METHOD,
+            {
+              basePath: url.searchParams.get('basePath')?.trim() ?? '',
+            },
+            relayHub,
+          )
+          setJson(res, 200, { data })
+          return
+        } catch (error) {
+          if (error instanceof BridgeHttpError) {
+            setJson(res, error.statusCode, { error: error.message })
             return
           }
-        } catch {
-          setJson(res, 404, { error: 'basePath does not exist' })
+          const message = error instanceof Error ? error.message : 'Failed to suggest project name'
+          const statusCode = message === 'Missing basePath'
+            ? 400
+            : message === 'basePath is not a directory'
+              ? 400
+              : message === 'basePath does not exist'
+                ? 404
+                : 500
+          setJson(res, statusCode, { error: message })
           return
         }
-
-        let index = 1
-        while (index < 100000) {
-          const candidateName = `New Project (${String(index)})`
-          const candidatePath = join(normalizedBasePath, candidateName)
-          try {
-            await stat(candidatePath)
-            index += 1
-            continue
-          } catch {
-            setJson(res, 200, { data: { name: candidateName, path: candidatePath } })
-            return
-          }
-        }
-
-        setJson(res, 500, { error: 'Failed to compute project name suggestion' })
-        return
       }
 
       if (req.method === 'POST' && url.pathname === '/codex-api/composer-file-search') {
         const payload = asRecord(await readJsonBody(req))
-        const rawCwd = typeof payload?.cwd === 'string' ? payload.cwd.trim() : ''
-        const query = typeof payload?.query === 'string' ? payload.query.trim() : ''
-        const limitRaw = typeof payload?.limit === 'number' ? payload.limit : 20
-        const limit = Math.max(1, Math.min(100, Math.floor(limitRaw)))
-        if (!rawCwd) {
-          setJson(res, 400, { error: 'Missing cwd' })
-          return
-        }
-        const cwd = isAbsolute(rawCwd) ? rawCwd : resolve(rawCwd)
         try {
-          const info = await stat(cwd)
-          if (!info.isDirectory()) {
-            setJson(res, 400, { error: 'cwd is not a directory' })
+          const resolved = await resolveServerRuntime(req, url, runtimeRegistry)
+          const data = await dispatchServerScopedBridgeMethod(
+            resolved,
+            SERVER_COMPOSER_FILE_SEARCH_METHOD,
+            {
+              cwd: typeof payload?.cwd === 'string' ? payload.cwd.trim() : '',
+              query: typeof payload?.query === 'string' ? payload.query.trim() : '',
+              limit: typeof payload?.limit === 'number' ? payload.limit : 20,
+            },
+            relayHub,
+          )
+          setJson(res, 200, { data })
+          return
+        } catch (error) {
+          if (error instanceof BridgeHttpError) {
+            setJson(res, error.statusCode, { error: error.message })
             return
           }
-        } catch {
-          setJson(res, 404, { error: 'cwd does not exist' })
-          return
-        }
-
-        try {
-          const files = await listFilesWithRipgrep(cwd)
-          const scored = files
-            .map((path) => ({ path, score: scoreFileCandidate(path, query) }))
-            .filter((row) => query.length === 0 || row.score < 10)
-            .sort((a, b) => (a.score - b.score) || a.path.localeCompare(b.path))
-            .slice(0, limit)
-            .map((row) => ({ path: row.path }))
-          setJson(res, 200, { data: scored })
-        } catch (error) {
-          setJson(res, 500, { error: getErrorMessage(error, 'Failed to search files') })
+          const message = error instanceof Error ? error.message : 'Failed to search files'
+          const statusCode = message === 'Missing cwd'
+            ? 400
+            : message === 'cwd is not a directory'
+              ? 400
+              : message === 'cwd does not exist'
+                ? 404
+                : 500
+          setJson(res, statusCode, { error: message })
         }
         return
       }
