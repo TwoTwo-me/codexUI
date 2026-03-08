@@ -18,22 +18,23 @@
         <div class="message-row">
           <div class="message-stack">
             <article class="request-card">
-              <p class="request-title">{{ request.method }}</p>
+              <p class="request-title">{{ requestHeadline(request) }}</p>
               <p class="request-meta">Request #{{ request.id }} · {{ formatIsoTime(request.receivedAtIso) }}</p>
 
               <p v-if="readRequestReason(request)" class="request-reason">{{ readRequestReason(request) }}</p>
+              <pre v-if="readRequestCommand(request)" class="request-command">{{ readRequestCommand(request) }}</pre>
 
               <section v-if="request.method === 'item/commandExecution/requestApproval'" class="request-actions">
-                <button type="button" class="request-button request-button-primary" @click="onRespondApproval(request.id, 'accept')">Accept</button>
-                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'acceptForSession')">Accept for Session</button>
-                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'decline')">Decline</button>
+                <button type="button" class="request-button request-button-primary" @click="onRespondApproval(request.id, 'accept')">Approve</button>
+                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'acceptForSession')">Approve for session</button>
+                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'decline')">Reject</button>
                 <button type="button" class="request-button" @click="onRespondApproval(request.id, 'cancel')">Cancel</button>
               </section>
 
               <section v-else-if="request.method === 'item/fileChange/requestApproval'" class="request-actions">
-                <button type="button" class="request-button request-button-primary" @click="onRespondApproval(request.id, 'accept')">Accept</button>
-                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'acceptForSession')">Accept for Session</button>
-                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'decline')">Decline</button>
+                <button type="button" class="request-button request-button-primary" @click="onRespondApproval(request.id, 'accept')">Approve</button>
+                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'acceptForSession')">Approve for session</button>
+                <button type="button" class="request-button" @click="onRespondApproval(request.id, 'decline')">Reject</button>
                 <button type="button" class="request-button" @click="onRespondApproval(request.id, 'cancel')">Cancel</button>
               </section>
 
@@ -564,6 +565,27 @@ function readRequestReason(request: UiServerRequest): string {
   return typeof reason === 'string' ? reason.trim() : ''
 }
 
+function readRequestCommand(request: UiServerRequest): string {
+  const params = asRecord(request.params)
+  const command = params?.command
+  return typeof command === 'string' ? command.trim() : ''
+}
+
+function requestHeadline(request: UiServerRequest): string {
+  switch (request.method) {
+    case 'item/commandExecution/requestApproval':
+      return 'Shell command approval'
+    case 'item/fileChange/requestApproval':
+      return 'File change approval'
+    case 'item/tool/requestUserInput':
+      return 'User input requested'
+    case 'item/tool/call':
+      return 'Tool call pending'
+    default:
+      return request.method
+  }
+}
+
 function toolQuestionKey(requestId: number, questionId: string): string {
   return `${String(requestId)}:${questionId}`
 }
@@ -990,6 +1012,10 @@ onBeforeUnmount(() => {
 
 .request-reason {
   @apply m-0 text-sm leading-5 text-amber-900 whitespace-pre-wrap;
+}
+
+.request-command {
+  @apply m-0 rounded-lg border border-amber-200 bg-white/80 px-3 py-2 text-xs leading-5 text-amber-950 whitespace-pre-wrap;
 }
 
 .request-actions {

@@ -45,107 +45,58 @@ function formatReceivedAt(value: string): string {
 </script>
 
 <style scoped>
+@reference "tailwindcss";
+
 .hook-inbox-panel {
-  display: grid;
-  gap: 16px;
+  @apply h-full overflow-auto px-4 pb-6 sm:px-6 flex flex-col gap-4;
 }
 
 .hook-inbox-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
+  @apply flex items-start justify-between gap-4;
 }
 
 .hook-inbox-eyebrow {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #b91c1c;
+  @apply m-0 text-xs font-semibold uppercase tracking-[0.08em] text-red-700;
 }
 
 .hook-inbox-title {
-  margin: 4px 0 0;
-  font-size: 24px;
-  font-weight: 700;
-  color: #111827;
+  @apply mt-1 text-2xl font-semibold text-zinc-950;
 }
 
 .hook-inbox-subtitle {
-  margin: 8px 0 0;
-  color: #4b5563;
+  @apply mt-2 text-sm text-zinc-500;
 }
 
 .hook-inbox-count {
-  display: inline-flex;
-  min-width: 32px;
-  min-height: 32px;
-  align-items: center;
-  justify-content: center;
-  padding: 0 10px;
-  border-radius: 999px;
-  background: #fee2e2;
-  color: #b91c1c;
-  font-weight: 700;
+  @apply inline-flex min-h-8 min-w-8 items-center justify-center rounded-full bg-red-100 px-2.5 font-semibold text-red-700;
 }
 
 .hook-inbox-empty {
-  margin: 0;
-  padding: 20px;
-  border-radius: 16px;
-  background: #f9fafb;
-  color: #6b7280;
+  @apply m-0 rounded-2xl bg-zinc-50 p-5 text-zinc-500;
 }
 
 .hook-inbox-list {
-  display: grid;
-  gap: 12px;
-  list-style: none;
-  margin: 0;
-  padding: 0;
+  @apply m-0 grid list-none gap-3 p-0;
 }
 
 .hook-inbox-item {
-  width: 100%;
-  display: grid;
-  gap: 6px;
-  padding: 16px;
-  border: 1px solid #fecaca;
-  border-radius: 16px;
-  background: #fff;
-  text-align: left;
-  cursor: pointer;
-}
-
-.hook-inbox-item:hover {
-  border-color: #f87171;
-  box-shadow: 0 10px 30px rgb(248 113 113 / 0.12);
+  @apply grid w-full gap-1.5 rounded-2xl border border-red-200 bg-white p-4 text-left transition hover:border-red-400 hover:shadow-[0_10px_30px_rgb(248_113_113_/0.12)];
 }
 
 .hook-inbox-item-top {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  @apply flex items-center gap-2.5;
 }
 
 .hook-inbox-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: #dc2626;
-  flex: 0 0 auto;
+  @apply h-2.5 w-2.5 flex-none rounded-full bg-red-600;
 }
 
 .hook-inbox-thread {
-  font-weight: 700;
-  color: #111827;
+  @apply font-semibold text-zinc-950;
 }
 
 .hook-inbox-meta,
 .hook-inbox-time {
-  color: #6b7280;
-  font-size: 14px;
+  @apply text-sm text-zinc-500;
 }
 </style>

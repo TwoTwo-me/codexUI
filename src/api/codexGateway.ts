@@ -604,6 +604,25 @@ export type ComposerFileSuggestion = {
   path: string
 }
 
+export type SkillsHubEntry = {
+  name: string
+  owner: string
+  description: string
+  displayName?: string
+  publishedAt?: number
+  avatarUrl?: string
+  url: string
+  installed: boolean
+  path?: string
+  enabled?: boolean
+}
+
+export type SkillsHubPayload = {
+  data: SkillsHubEntry[]
+  installed?: SkillsHubEntry[]
+  total: number
+}
+
 function normalizeComposerFileSuggestions(payload: unknown): ComposerFileSuggestion[] {
   const rows = Array.isArray(payload) ? payload : []
   const suggestions: ComposerFileSuggestion[] = []
@@ -643,6 +662,121 @@ export async function searchComposerFiles(cwd: string, query = '', limit = 20): 
       : {}
 
   return normalizeComposerFileSuggestions(envelope.data)
+}
+
+function normalizeSkillsHubEntry(payload: unknown): SkillsHubEntry | null {
+  const record = asRecord(payload)
+  if (!record) return null
+
+  const name = readString(record.name)
+  const owner = readString(record.owner)
+  const url = readString(record.url)
+  if (!name || !owner || !url) return null
+
+  const description = readString(record.description)
+  const displayName = readString(record.displayName) || undefined
+  const avatarUrl = readString(record.avatarUrl) || undefined
+  const path = readString(record.path) || undefined
+  const publishedAt = typeof record.publishedAt === 'number' && Number.isFinite(record.publishedAt)
+    ? Math.trunc(record.publishedAt)
+    : undefined
+
+  return {
+    name,
+    owner,
+    description,
+    ...(displayName ? { displayName } : {}),
+    ...(publishedAt !== undefined ? { publishedAt } : {}),
+    ...(avatarUrl ? { avatarUrl } : {}),
+    url,
+    installed: record.installed === true,
+    ...(path ? { path } : {}),
+    ...(typeof record.enabled === 'boolean' ? { enabled: record.enabled } : {}),
+  }
+}
+
+function normalizeSkillsHubPayload(payload: unknown): SkillsHubPayload {
+  const envelope = asRecord(payload)
+  const dataRows = Array.isArray(envelope?.data) ? envelope.data : []
+  const installedRows = Array.isArray(envelope?.installed) ? envelope.installed : []
+  const total = typeof envelope?.total === 'number' && Number.isFinite(envelope.total)
+    ? Math.max(0, Math.trunc(envelope.total))
+    : dataRows.length
+
+  return {
+    data: dataRows.map(normalizeSkillsHubEntry).filter((entry): entry is SkillsHubEntry => entry !== null),
+    installed: installedRows.map(normalizeSkillsHubEntry).filter((entry): entry is SkillsHubEntry => entry !== null),
+    total,
+  }
+}
+
+export async function getSkillsHubPayload(options: {
+  query?: string
+  sort?: 'date' | 'name'
+  limit?: number
+} = {}): Promise<SkillsHubPayload> {
+  const params = new URLSearchParams()
+  if (options.query?.trim()) {
+    params.set('q', options.query.trim())
+  }
+  params.set('limit', String(options.limit ?? 100))
+  params.set('sort', options.sort ?? 'date')
+
+  const response = await fetch(buildServerScopedPath(`/codex-api/skills-hub?${params.toString()}`))
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to load skills hub'))
+  }
+  const envelope = asRecord(payload)
+  return normalizeSkillsHubPayload(envelope)
+}
+
+export async function getSkillReadme(owner: string, name: string): Promise<string> {
+  const params = new URLSearchParams({ owner, name })
+  const response = await fetch(buildServerScopedPath(`/codex-api/skills-hub/readme?${params.toString()}`))
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to load skill contents'))
+  }
+  const envelope = asRecord(payload)
+  return readString(envelope?.content)
+}
+
+export async function installSkillFromHub(owner: string, name: string): Promise<{ ok: boolean; path?: string }> {
+  const response = await fetch(buildServerScopedPath('/codex-api/skills-hub/install'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ owner, name }),
+  })
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to install skill'))
+  }
+  const envelope = asRecord(payload)
+  const path = readString(envelope?.path)
+  return {
+    ok: envelope?.ok === true,
+    ...(path ? { path } : {}),
+  }
+}
+
+export async function uninstallSkillFromHub(name: string, path?: string): Promise<{ ok: boolean }> {
+  const response = await fetch(buildServerScopedPath('/codex-api/skills-hub/uninstall'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name,
+      ...(path?.trim() ? { path: path.trim() } : {}),
+    }),
+  })
+  const payload = (await response.json()) as unknown
+  if (!response.ok) {
+    throw new Error(getErrorMessageFromPayload(payload, 'Failed to uninstall skill'))
+  }
+  const envelope = asRecord(payload)
+  return {
+    ok: envelope?.ok === true,
+  }
 }
 
 function getErrorMessageFromPayload(payload: unknown, fallback: string): string {

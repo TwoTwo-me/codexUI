@@ -169,8 +169,26 @@
         </ContentHeader>
 
         <section class="content-body">
+          <div
+            v-if="hasPendingHooks && !isHooksRoute"
+            class="hook-alert-banner"
+            role="status"
+            aria-live="polite"
+          >
+            <div class="hook-alert-banner-copy">
+              <p class="hook-alert-banner-title">
+                {{ pendingHookCount }} pending approval{{ pendingHookCount === 1 ? '' : 's' }} require{{ pendingHookCount === 1 ? 's' : '' }} attention
+              </p>
+              <p class="hook-alert-banner-body">
+                Review connector hook requests before Codex can continue shell, file, or tool actions.
+              </p>
+            </div>
+            <button type="button" class="hook-alert-banner-action" @click="router.push({ name: 'hooks' })">
+              Review hooks
+            </button>
+          </div>
           <template v-if="isSkillsRoute">
-            <SkillsHub @skills-changed="onSkillsChanged" />
+            <SkillsHub :server-id="selectedServerId" @skills-changed="onSkillsChanged" />
           </template>
           <template v-else-if="isAdminRoute">
             <AdminPanel v-if="isAdminUser" />
@@ -888,6 +906,26 @@ async function onLogout(): Promise<void> {
 
 .content-body {
   @apply flex-1 min-h-0 w-full flex flex-col gap-2 sm:gap-3 pt-1 pb-2 sm:pb-4 overflow-y-hidden overflow-x-visible;
+}
+
+.hook-alert-banner {
+  @apply mx-3 sm:mx-6 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 sm:px-5 flex items-center justify-between gap-3;
+}
+
+.hook-alert-banner-copy {
+  @apply min-w-0 flex flex-col gap-1;
+}
+
+.hook-alert-banner-title {
+  @apply m-0 text-sm font-semibold text-red-900;
+}
+
+.hook-alert-banner-body {
+  @apply m-0 text-sm text-red-700;
+}
+
+.hook-alert-banner-action {
+  @apply shrink-0 rounded-lg border border-red-300 bg-white px-3 py-2 text-sm font-medium text-red-800 transition hover:bg-red-100;
 }
 
 .content-error {

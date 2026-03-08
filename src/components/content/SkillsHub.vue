@@ -70,7 +70,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import {
+  getSkillsHubPayload,
+  installSkillFromHub,
+  uninstallSkillFromHub,
+  type SkillsHubEntry,
+} from '../../api/codexGateway'
 import IconTablerSearch from '../icons/IconTablerSearch.vue'
 import IconTablerChevronRight from '../icons/IconTablerChevronRight.vue'
 import SkillCard from './SkillCard.vue'
@@ -79,6 +85,12 @@ import SkillDetailModal, { type HubSkill } from './SkillDetailModal.vue'
 const EMPTY_SKILL: HubSkill = { name: '', owner: '', description: '', url: '', installed: false }
 const SKILLS_HUB_CACHE_KEY = 'codex-web-local.skills-hub.cache.v1'
 type SkillsHubPayload = { data: HubSkill[]; installed?: HubSkill[]; total: number }
+
+const props = withDefaults(defineProps<{
+  serverId?: string
+}>(), {
+  serverId: '',
+})
 
 const searchRef = ref<HTMLInputElement | null>(null)
 const query = ref('')
@@ -133,7 +145,7 @@ function toggleSort(): void {
 }
 
 function cacheKey(q: string): string {
-  return `${sortMode.value}::${q.trim().toLowerCase()}`
+  return `${props.serverId || 'default'}::${sortMode.value}::${q.trim().toLowerCase()}`
 }
 
 function readCache(key: string): SkillsHubPayload | null {
@@ -186,6 +198,21 @@ function applySkillsPayload(payload: SkillsHubPayload): void {
   totalCount.value = payload.total
 }
 
+function toHubSkill(skill: SkillsHubEntry): HubSkill {
+  return {
+    name: skill.name,
+    owner: skill.owner,
+    description: skill.description,
+    ...(skill.displayName ? { displayName: skill.displayName } : {}),
+    ...(typeof skill.publishedAt === 'number' ? { publishedAt: skill.publishedAt } : {}),
+    ...(skill.avatarUrl ? { avatarUrl: skill.avatarUrl } : {}),
+    url: skill.url,
+    installed: skill.installed,
+    ...(skill.path ? { path: skill.path } : {}),
+    ...(typeof skill.enabled === 'boolean' ? { enabled: skill.enabled } : {}),
+  }
+}
+
 async function fetchSkills(q: string): Promise<void> {
   const key = cacheKey(q)
   const cached = readCache(key)
@@ -195,13 +222,16 @@ async function fetchSkills(q: string): Promise<void> {
   isLoading.value = !cached
   error.value = ''
   try {
-    const params = new URLSearchParams()
-    if (q.trim()) params.set('q', q.trim())
-    params.set('limit', '100')
-    params.set('sort', sortMode.value)
-    const resp = await fetch(`/codex-api/skills-hub?${params}`)
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const data = (await resp.json()) as SkillsHubPayload
+    const payload = await getSkillsHubPayload({
+      query: q.trim(),
+      limit: 100,
+      sort: sortMode.value,
+    })
+    const data: SkillsHubPayload = {
+      data: payload.data.map(toHubSkill),
+      installed: (payload.installed ?? []).map(toHubSkill),
+      total: payload.total,
+    }
     applySkillsPayload(data)
     writeCache(key, data)
   } catch (e) {
@@ -225,13 +255,8 @@ async function handleInstall(skill: HubSkill): Promise<void> {
   actionSkillKey.value = `${skill.owner}/${skill.name}`
   isInstallActionInFlight.value = true
   try {
-    const resp = await fetch('/codex-api/skills-hub/install', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ owner: skill.owner, name: skill.name }),
-    })
-    const data = (await resp.json()) as { ok?: boolean; error?: string; path?: string }
-    if (!data.ok) throw new Error(data.error || 'Install failed')
+    const data = await installSkillFromHub(skill.owner, skill.name)
+    if (!data.ok) throw new Error('Install failed')
     const installed = { ...skill, installed: true, path: data.path, enabled: true }
     installedSkills.value = [...installedSkills.value, installed]
     browseSkills.value = browseSkills.value.filter((s) => s.name !== skill.name)
@@ -251,13 +276,8 @@ async function handleUninstall(skill: HubSkill): Promise<void> {
   actionSkillKey.value = `${skill.owner}/${skill.name}`
   isUninstallActionInFlight.value = true
   try {
-    const resp = await fetch('/codex-api/skills-hub/uninstall', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: skill.name, path: skill.path }),
-    })
-    const data = (await resp.json()) as { ok?: boolean; error?: string }
-    if (!data.ok) throw new Error(data.error || 'Uninstall failed')
+    const data = await uninstallSkillFromHub(skill.name, skill.path)
+    if (!data.ok) throw new Error('Uninstall failed')
     installedSkills.value = installedSkills.value.filter((s) => s.name !== skill.name)
     if (skill.owner !== 'local') {
       browseSkills.value = [...browseSkills.value, { ...skill, installed: false, path: undefined, enabled: undefined }]
@@ -289,6 +309,13 @@ async function handleToggleEnabled(skill: HubSkill, enabled: boolean): Promise<v
 }
 
 onMounted(() => {
+  void fetchSkills('')
+})
+
+watch(() => props.serverId, () => {
+  query.value = ''
+  error.value = ''
+  isDetailOpen.value = false
   void fetchSkills('')
 })
 </script>
